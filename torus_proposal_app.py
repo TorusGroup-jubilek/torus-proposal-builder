@@ -457,32 +457,158 @@ def add_scope_of_work_table(doc):
 
 import os
 
-def docx_bytes_from_text(text: str) -> bytes:
+from docx.enum.table import WD_TABLE_ALIGNMENT
+
+CHECK = "✓"
+
+
+def _has_keyword(text: str, keywords) -> bool:
+    t = (text or "").lower()
+    return any(k.lower() in t for k in keywords)
+
+
+def compute_cleaning_schedule(p) -> list:
+    """
+    Returns list of rows: (task, daily, weekly, monthly)
+    Uses p.days_per_week, room counts, floor_types, and options.
+    """
+    d = int(p.days_per_week or 0)
+
+    # Helper: decide if something is "daily" vs "weekly" based on how many days/week
+    def freq_for_core():
+        # If they clean 5+ days/week, core items are daily.
+        # If 3-4, many core items still get "Daily" (on service days) but some shift to weekly.
+        # If 1-2, core items typically weekly.
+        if d >= 5:
+            return "daily"
+        if d >= 3:
+            return "daily"
+        if d >= 1:
+            return "weekly"
+        return "weekly"
+
+    core_freq = freq_for_core()
+
+    # Floors keyword detection
+    has_carpet = _has_keyword(p.floor_types, ["carpet"])
+    has_vct = _has_keyword(p.floor_types, ["vct", "vinyl"])
+    has_epoxy = _has_keyword(p.floor_types, ["epoxy"])
+    has_tile = _has_keyword(p.floor_types, ["tile"])
+    hard_floors = has_vct or has_epoxy or has_tile or _has_keyword(p.floor_types, ["hard", "concrete"])
+
+    rows = []
+
+    # --- Core tasks (almost always included) ---
+    rows.append(("Empty trash & replace liners", CHECK if core_freq == "daily" else "", CHECK if core_freq == "weekly" else "", ""))
+    rows.append(("Clean/disinfect high-touch points (handles, switches, rails)", CHECK if core_freq == "daily" else "", CHECK if core_freq == "weekly" else "", ""))
+
+    # Restrooms
+    if int(p.num_bathrooms or 0) > 0:
+        # Restrooms usually daily when 3+ days/week; weekly when 1-2
+        rr_daily = CHECK if d >= 3 else ""
+        rr_weekly = CHECK if d in (1, 2) else ""
+        rows.append(("Clean & disinfect restrooms; restock as applicable", rr_daily, rr_weekly, ""))
+
+    # Break rooms / kitchens
+    if int(p.num_break_rooms or 0) > 0 or int(p.num_kitchens or 0) > 0:
+        br_daily = CHECK if d >= 5 else ""
+        br_weekly = CHECK if d in (1, 2, 3, 4) else ""
+        rows.append(("Break rooms/kitchens: counters, sinks, exterior appliances", br_daily, br_weekly, ""))
+
+    # Dusting
+    # Dusting is usually weekly unless service is daily.
+    rows.append(("Dust horizontal surfaces (accessible)", CHECK if d >= 5 else "", CHECK if d in (1,2,3,4) else "", ""))
+
+    # Floors
+    if has_carpet:
+        rows.append(("Vacuum carpeted areas (as applicable)", CHECK if d >= 3 else "", CHECK if d in (1,2) else "", ""))
+        rows.append(("Spot treat carpet stains (as needed)", CHECK if d >= 5 else "", CHECK if d in (1,2,3,4) else "", ""))
+        rows.append(("Carpet extraction / shampoo (as scheduled)", "", "", CHECK))
+
+    if hard_floors:
+        rows.append(("Damp mop hard floors (as applicable)", CHECK if d >= 5 else "", CHECK if d in (1,2,3,4) else "", ""))
+        rows.append(("Detail floor scrubbing / machine scrub", "", CHECK if d >= 3 else "", CHECK))
+
+    # Glass / mirrors
+    rows.append(("Spot clean glass & mirrors (interior)", CHECK if d >= 5 else "", CHECK if d in (1,2,3,4) else "", ""))
+
+    # Monthly items
+    rows.append(("High dusting (vents, ledges, corners)", "", "", CHECK))
+    rows.append(("Baseboards / detail edges (as applicable)", "", "", CHECK))
+
+    # VCT extras (optional schedule)
+    if has_vct:
+        rows.append(("VCT maintenance (buff/burnish if applicable)", "", "", CHECK))
+        rows.append(("Strip & wax (as quoted/needed)", "", "", CHECK))
+
+    # Locker rooms (if present)
+    if int(p.num_locker_rooms or 0) > 0:
+        rows.append(("Locker rooms: clean/disinfect & mop", CHECK if d >= 3 else "", CHECK if d in (1,2) else "", ""))
+
+    # Day porter note (if yes, we add a line item)
+    if getattr(p, "day_porter_needed", "No") == "Yes":
+        rows.append(("Day porter tasks (restroom checks, spills, touch-ups)", CHECK, "", ""))
+
+    # If deep clean option is on, add a deep clean row
+    if getattr(p, "deep_clean_option", "None") != "None":
+        # One-time deep clean isn't monthly, but quarterly is a cadence; we’ll show it under Monthly as "scheduled".
+        rows.append(("Deep clean tasks (per agreement)", "", "", CHECK))
+
+    # Convert frequencies into checkmarks (already done), and return
+    return rows
+
+
+def add_scope_of_work_table(doc, p):
+    title_p = doc.add_paragraph()
+    title_run = title_p.add_run("SCOPE OF WORK – CLEANING SCHEDULE")
+    title_run.bold = True
+
+    table = doc.add_table(rows=1, cols=4)
+    table.alignment = WD_TABLE_ALIGNMENT.LEFT
+    table.style = "Table Grid"
+
+    hdr = table.rows[0].cells
+    hdr[0].text = "Task"
+    hdr[1].text = "Daily"
+    hdr[2].text = "Weekly"
+    hdr[3].text = "Monthly"
+
+    for task, daily, weekly, monthly in compute_cleaning_schedule(p):
+        row = table.add_row().cells
+        row[0].text = task
+        row[1].text = daily
+        row[2].text = weekly
+        row[3].text = monthly
+
+    doc.add_paragraph("")  # spacer
+
+import os
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+
+def docx_bytes_from_text(text: str, p) -> bytes:
     template_path = "proposal_template.docx"
     doc = Document(template_path) if os.path.exists(template_path) else Document()
 
-    lines = text.splitlines()
+    for line in text.splitlines():
+        s = line.strip()
 
-    for line in lines:
-        line_stripped = line.strip()
-
-        if not line_stripped:
+        if not s:
             doc.add_paragraph("")
             continue
 
-        if line_stripped == "CLEANING SERVICE AGREEMENT":
-            p = doc.add_paragraph()
-            p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-            run = p.add_run(line_stripped)
+        if s == "CLEANING SERVICE AGREEMENT":
+            para = doc.add_paragraph()
+            para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            run = para.add_run(s)
             run.bold = True
             continue
 
-        # Insert Scope of Work table at the right place
-        if line_stripped == "SCOPE_OF_WORK_TABLE":
-            add_scope_of_work_table(doc)
+        # Inject the dynamic table where the placeholder appears
+        if s == "SCOPE_OF_WORK_TABLE":
+            add_scope_of_work_table(doc, p)
             continue
 
-        doc.add_paragraph(line_stripped)
+        doc.add_paragraph(s)
 
     bio = BytesIO()
     doc.save(bio)
@@ -748,7 +874,7 @@ with colA:
         mime="text/plain",
     )
 with colB:
-    docx_data = docx_bytes_from_text(proposal_text)
+    docx_data = docx_bytes_from_text(proposal_text, p)
     st.download_button(
         "Download .docx (Word)",
         data=docx_data,
