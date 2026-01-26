@@ -422,7 +422,8 @@ Date prepared: {today}
 
 Client / Location Name: {p.client}
 Facility/Location Name: {p.facility_name}
-Service Address(es): {address_inline}
+Service Address(es):
+SERVICE_ADDRESSES_BULLETS
 
 {para1}
 
@@ -470,8 +471,16 @@ Contractor Authorized Signature: ___________________________   Date: ___________
 # Word export (uses template if present)
 # =========================
 
+def add_address_bullets(doc: Document, addresses: List[str]):
+    addresses = clean_list(addresses)
+    if not addresses:
+        doc.add_paragraph("(not provided)")
+        return
+    for a in addresses:
+        doc.add_paragraph(a, style="List Bullet")
+
 def docx_from_agreement(text: str, schedule_rows: list) -> bytes:
-    template_path = "proposal_template.docx"
+    template_path = "Torus_Template.docx"
     doc = Document(template_path) if os.path.exists(template_path) else Document()
 
     for line in text.splitlines():
@@ -490,6 +499,10 @@ def docx_from_agreement(text: str, schedule_rows: list) -> bytes:
 
         if s == "SCOPE_OF_WORK_TABLE":
             add_scope_of_work_table(doc, schedule_rows)
+            continue
+
+        if s == "SERVICE_ADDRESSES_BULLETS":
+            add_address_bullets(doc, st.session_state.service_addresses)
             continue
 
         doc.add_paragraph(s)
