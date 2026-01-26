@@ -1,7 +1,8 @@
 import datetime
+import os
 from dataclasses import dataclass, asdict
 from io import BytesIO
-from typing import List, Dict
+from typing import List, Dict, Optional
 
 import streamlit as st
 from docx import Document
@@ -10,27 +11,38 @@ from docx import Document
 COMPANY_NAME = "Torus Group"
 
 
+# ---------------- Data ----------------
+
 @dataclass
 class ProposalInputs:
-    client_name: str
+    # Core
+    client: str
     facility_name: str
-    facility_address: str
     space_type: str
     square_footage: int
+    floor_types: str
+
+    # Service details
+    service_begin_date: str
+    service_end_date: str
+    service_addresses: List[str]
+    days_per_week: int
+    cleaning_times: str
+
+    # Rooms
     num_offices: int
     num_conference_rooms: int
     num_break_rooms: int
     num_bathrooms: int
     num_kitchens: int
     num_locker_rooms: int
-    floor_types: str
+
+    # Ops
     cleaning_frequency: str
     day_porter_needed: str  # Yes/No
     trash_pickup: str
     restocking_needed: str  # Yes/No
     supplies_included: str  # Yes/No
-    start_date: str
-    notes: str
 
     # Pricing
     pricing_mode: str  # Monthly Fixed | Per Sq Ft | Per Visit
@@ -50,26 +62,40 @@ class ProposalInputs:
     additional_services: List[Dict[str, float]]  # [{"name": str, "price": float}]
     include_addons_in_total: str  # Yes/No
 
-    # Admin / terms
-    payment_terms: str  # Net 15 / Net 30 / Due on receipt / Custom
-    custom_payment_terms: str
-    walkthrough_date: str  # free text or date string
+    # Tax / payment
+    sales_tax_percent: float
+    net_terms: int  # 15/30/45/60
 
+    # Compensation
+    compensation_mode: str  # Auto (calculated) | Override
+    compensation_override: float
+
+    # Notes
+    notes: str
+
+
+# ---------------- Helpers ----------------
 
 def money(x: float) -> str:
     return f"${x:,.2f}"
 
 
 def compute_visits_per_month(visits_per_week: float) -> int:
-    # 52 weeks / 12 months ≈ 4.3333 weeks/month
-    vpm = visits_per_week * (52.0 / 12.0)
-    return int(round(vpm))
+    # 52 weeks / 12 months ≈ 4.3333
+    return int(round(visits_per_week * (52.0 / 12.0)))
 
 
-def build_totals(p: ProposalInputs):
-    base_monthly = 0.0
-    base_explain = ""
+def clean_address_list(items: List[str]) -> List[str]:
+    out = []
+    for s in items:
+        s2 = (s or "").strip()
+        if s2:
+            out.append(s2)
+    return out
 
+
+def build_totals(p: ProposalInputs) -> dict:
+    # Base monthly
     if p.pricing_mode == "Monthly Fixed":
         base_monthly = float(p.monthly_fixed_price)
         base_explain = f"Monthly fixed price: {money(base_monthly)}"
@@ -78,15 +104,14 @@ def build_totals(p: ProposalInputs):
         base_monthly = float(p.rate_per_sqft) * float(p.square_footage)
         base_explain = f"Rate: {money(p.rate_per_sqft)}/sqft × {p.square_footage:,} sqft = {money(base_monthly)} per month"
 
-    elif p.pricing_mode == "Per Visit":
+    else:  # Per Visit
         base_monthly = float(p.rate_per_visit) * float(p.visits_per_month)
         base_explain = (
             f"Rate: {money(p.rate_per_visit)}/visit × {p.visits_per_month} visits/month "
             f"({p.visits_per_week:g}/week) = {money(base_monthly)} per month"
         )
-    else:
-        base_explain = "Pricing: (not set)"
 
+    # Add-ons
     addons_total = 0.0
     addons_lines = []
     for item in p.additional_services:
@@ -96,6 +121,10 @@ def build_totals(p: ProposalInputs):
             addons_total += price
             addons_lines.append(f"• {name}: {money(price)}")
 
+    include_addons = (p.include_addons_in_total == "Yes")
+    addons_included_monthly = addons_total if include_addons else 0.0
+
+    # Deep clean handling
     deep_clean_one_time = 0.0
     deep_clean_quarterly = 0.0
     deep_clean_monthly_equiv = 0.0
@@ -106,8 +135,21 @@ def build_totals(p: ProposalInputs):
         deep_clean_quarterly = float(p.deep_clean_price)
         deep_clean_monthly_equiv = deep_clean_quarterly / 3.0
 
-    include_addons = (p.include_addons_in_total == "Yes")
-    monthly_total = base_monthly + (addons_total if include_addons else 0.0) + deep_clean_monthly_equiv
+    # Subtotal (monthly)
+    monthly_subtotal = base_monthly + addons_included_monthly + deep_clean_monthly_equiv
+
+    # Sales tax (monthly)
+    tax_rate = max(0.0, float(p.sales_tax_percent)) / 100.0
+    monthly_tax = monthly_subtotal * tax_rate
+    monthly_total_with_tax = monthly_subtotal + monthly_tax
+
+    # Compensation display (monthly)
+    if p.compensation_mode == "Override":
+        compensation_monthly = float(p.compensation_override)
+        compensation_explain = f"Compensation (override): {money(compensation_monthly)}"
+    else:
+        compensation_monthly = monthly_total_with_tax
+        compensation_explain = f"Compensation (calculated): {money(compensation_monthly)}"
 
     return {
         "base_monthly": base_monthly,
@@ -115,16 +157,26 @@ def build_totals(p: ProposalInputs):
         "addons_total": addons_total,
         "addons_lines": addons_lines,
         "include_addons": include_addons,
+        "addons_included_monthly": addons_included_monthly,
         "deep_clean_one_time": deep_clean_one_time,
         "deep_clean_quarterly": deep_clean_quarterly,
         "deep_clean_monthly_equiv": deep_clean_monthly_equiv,
-        "monthly_total": monthly_total,
+        "monthly_subtotal": monthly_subtotal,
+        "monthly_tax": monthly_tax,
+        "monthly_total_with_tax": monthly_total_with_tax,
+        "compensation_monthly": compensation_monthly,
+        "compensation_explain": compensation_explain,
     }
 
 
 def build_proposal_text(p: ProposalInputs) -> str:
     today = datetime.date.today().strftime("%B %d, %Y")
     totals = build_totals(p)
+
+    addresses = clean_address_list(p.service_addresses)
+    address_block = "\n".join([f"• {a}" for a in addresses]) if addresses else "• (not provided)"
+
+    floor_note = f"Floor types/notes: {p.floor_types}" if p.floor_types.strip() else "Floor types/notes: N/A"
 
     scope_lines = [
         "• Empty trash/recycling; replace liners as needed",
@@ -135,84 +187,61 @@ def build_proposal_text(p: ProposalInputs) -> str:
         "• Clean and disinfect bathrooms; refill soap/paper as applicable",
         "• Break rooms/kitchens: wipe counters, clean sinks, exterior of appliances",
     ]
-
     if p.num_conference_rooms > 0:
         scope_lines.append("• Conference rooms: wipe tables, straighten, vacuum/mop")
-
     if p.num_locker_rooms > 0:
         scope_lines.append("• Locker rooms: clean/disinfect, mop floors, touchpoint disinfection")
-
     if p.day_porter_needed == "Yes":
         scope_lines.append("• Day porter support (restroom checks, spills, touchpoints, common areas)")
-
     if p.restocking_needed == "Yes":
         scope_lines.append("• Restocking of consumables (client-provided unless supplies included)")
 
-    floor_note = f"Floor types/notes: {p.floor_types}" if p.floor_types.strip() else "Floor types/notes: N/A"
-
-    # Pricing summary formatting
+    # Pricing summary
     pricing_lines = [f"• Base service: {totals['base_explain']}"]
 
     if totals["include_addons"]:
         pricing_lines.append(f"• Additional services (included): {money(totals['addons_total'])} per month")
     else:
-        if totals["addons_total"] > 0:
-            pricing_lines.append(f"• Additional services (not included in total): {money(totals['addons_total'])}")
-        else:
-            pricing_lines.append("• Additional services: None")
+        pricing_lines.append(
+            f"• Additional services (not included in total): {money(totals['addons_total'])}"
+            if totals["addons_total"] > 0 else
+            "• Additional services: None"
+        )
 
-    deep_clean_block = ""
     if p.deep_clean_option == "One-time":
         pricing_lines.append(f"• One-time deep clean: {money(totals['deep_clean_one_time'])} (one-time)")
     elif p.deep_clean_option == "Quarterly":
         pricing_lines.append(f"• Quarterly deep clean: {money(totals['deep_clean_quarterly'])} per quarter")
         pricing_lines.append(f"• Quarterly deep clean monthly equivalent: {money(totals['deep_clean_monthly_equiv'])}/month")
 
-    pricing_lines.append(f"• Estimated monthly total: {money(totals['monthly_total'])}")
+    pricing_lines.append(f"• Monthly subtotal (pre-tax): {money(totals['monthly_subtotal'])}")
+    pricing_lines.append(f"• Sales tax ({p.sales_tax_percent:.2f}%): {money(totals['monthly_tax'])}")
+    pricing_lines.append(f"• Monthly total (with tax): {money(totals['monthly_total_with_tax'])}")
+    pricing_lines.append(f"• {totals['compensation_explain']}")
 
-    if p.deep_clean_option != "None":
-        includes = p.deep_clean_includes[:] if p.deep_clean_includes else []
-        if includes:
-            deep_clean_block = (
-                "\nDEEP CLEAN INCLUDES\n"
-                + "\n".join([f"• {x}" for x in includes])
-                + "\n"
-            )
+    deep_clean_block = ""
+    if p.deep_clean_option != "None" and p.deep_clean_includes:
+        deep_clean_block = "\nDEEP CLEAN INCLUDES\n" + "\n".join([f"• {x}" for x in p.deep_clean_includes]) + "\n"
 
     addon_detail_block = ""
     if totals["addons_lines"]:
         addon_detail_block = "\nADDITIONAL SERVICES (LINE ITEMS)\n" + "\n".join(totals["addons_lines"]) + "\n"
 
-    # Payment terms + walkthrough
-    if p.payment_terms == "Custom":
-        pay_terms = p.custom_payment_terms.strip() or "Custom (to be specified)"
-    else:
-        pay_terms = p.payment_terms
-
-    walkthrough_line = f"Walkthrough date: {p.walkthrough_date}" if p.walkthrough_date.strip() else "Walkthrough date: (to be scheduled)"
-
-    terms = [
-        f"Service frequency: {p.cleaning_frequency}",
-        f"Trash pickup schedule: {p.trash_pickup}",
-        f"Supplies included: {p.supplies_included}",
-        f"Target start date: {p.start_date}",
-        walkthrough_line,
-        f"Payment terms: {pay_terms}",
-        "Pricing assumes normal access, utilities available, and standard soil levels.",
-        "Specialty services (strip & wax, carpet extraction, high dusting) can be added by request.",
-    ]
-
-    if p.notes.strip():
-        terms.append(f"Additional notes: {p.notes}")
-
     return f"""JANITORIAL SERVICES PROPOSAL
 {COMPANY_NAME}
 Date: {today}
 
-Prepared For:
-{p.client_name}
-Facility: {p.facility_name}
-Address: {p.facility_address}
+CLIENT / SERVICE INFO
+Client: {p.client}
+Facility/Location Name: {p.facility_name}
+Service begin date: {p.service_begin_date}
+Service end date: {p.service_end_date}
+Number of days per week: {p.days_per_week}
+Cleaning times: {p.cleaning_times}
+Net pay terms: Net {p.net_terms}
+
+SERVICE ADDRESSES
+{address_block}
 
 FACILITY OVERVIEW
 • Space type: {p.space_type}
@@ -231,8 +260,8 @@ SCOPE OF WORK (SUMMARY)
 PRICING SUMMARY
 {chr(10).join(pricing_lines)}
 {deep_clean_block}{addon_detail_block}
-SERVICE TERMS / ASSUMPTIONS
-{chr(10).join("• " + t for t in terms)}
+NOTES
+{p.notes if p.notes.strip() else "(none)"}
 
 ACCEPTANCE
 Authorized Signature: ___________________________    Date: _______________
@@ -240,62 +269,18 @@ Authorized Signature: ___________________________    Date: _______________
 
 
 def docx_bytes_from_text(text: str) -> bytes:
-    from docx.shared import Inches
-from docx.enum.text import WD_ALIGN_PARAGRAPH
-from docx.oxml import OxmlElement, ns
+    """
+    Uses proposal_template.docx if it exists (keeps your footer/header exactly).
+    If not present, generates a normal doc.
+    """
+    template_path = "proposal_template.docx"
+    if os.path.exists(template_path):
+        doc = Document(template_path)
+    else:
+        doc = Document()
 
-
-def add_horizontal_line(paragraph):
-    p = paragraph._p
-    pPr = p.get_or_add_pPr()
-    pBdr = OxmlElement('w:pBdr')
-    bottom = OxmlElement('w:bottom')
-    bottom.set(ns.qn('w:val'), 'single')
-    bottom.set(ns.qn('w:sz'), '6')
-    bottom.set(ns.qn('w:space'), '1')
-    bottom.set(ns.qn('w:color'), 'auto')
-    pBdr.append(bottom)
-    pPr.append(pBdr)
-
-
-def docx_bytes_from_text(text: str) -> bytes:
-    doc = Document()
-
-    # ---- HEADER TABLE (LOGO LEFT, INFO RIGHT) ----
-    table = doc.add_table(rows=1, cols=2)
-    table.autofit = True
-
-    # Logo cell
-    logo_cell = table.rows[0].cells[0]
-    try:
-        logo_paragraph = logo_cell.paragraphs[0]
-        logo_paragraph.alignment = WD_ALIGN_PARAGRAPH.LEFT
-        run = logo_paragraph.add_run()
-        run.add_picture("logo.png", width=Inches(1.5))
-    except Exception:
-        logo_cell.text = ""
-
-    # Company info cell
-    info_cell = table.rows[0].cells[1]
-    info_paragraph = info_cell.paragraphs[0]
-    info_paragraph.alignment = WD_ALIGN_PARAGRAPH.LEFT
-
-    info_run = info_paragraph.add_run(
-        "Torus Cleaning Services\n"
-        "Phone: 757-775-8053\n"
-        "Email: jubilek@torusgroupservices.com\n"
-        "www.torusgroupservices.com"
-    )
-    info_run.bold = True
-
-    # Spacer + horizontal line
-    spacer = doc.add_paragraph("")
-    line_paragraph = doc.add_paragraph("")
-    add_horizontal_line(line_paragraph)
-
-    # ---- DOCUMENT BODY ----
     for line in text.splitlines():
-        if line.strip() and line == line.upper() and len(line) <= 80:
+        if line.strip() and line == line.upper() and len(line) <= 90:
             para = doc.add_paragraph()
             run = para.add_run(line)
             run.bold = True
@@ -310,41 +295,41 @@ def docx_bytes_from_text(text: str) -> bytes:
 # ---------------- UI ----------------
 
 st.set_page_config(page_title=f"{COMPANY_NAME} Proposal Builder", layout="wide")
-st.title(f"{COMPANY_NAME} — Janitorial Proposal Builder")
+st.title(f"{COMPANY_NAME} — Proposal Builder")
 
-# Sidebar inputs
+# Sidebar
 with st.sidebar:
-    st.header("Client / Site")
-    client_name = st.text_input("Client name")
-    facility_name = st.text_input("Facility name")
-    facility_address = st.text_area("Facility address", height=80)
+    st.header("Client / Contract")
+    client = st.text_input("Client (legal name)")
+    facility_name = st.text_input("Facility/Location name")
 
-    st.header("Service")
+    service_begin_date = st.text_input("Service begin date")
+    service_end_date = st.text_input("Service end date")
+
+    net_terms = st.selectbox("Net pay terms", [15, 30, 45, 60], index=1)
+
+    days_per_week = st.number_input("Number of days per week", min_value=0, step=1, value=5)
+    cleaning_times = st.text_input("Cleaning times (e.g., 6:00 PM – 10:00 PM)")
+
+    st.header("Sales Tax")
+    sales_tax_percent = st.number_input("Sales tax (%)", min_value=0.0, step=0.25, value=0.0)
+
+    st.header("Service (ops)")
     cleaning_frequency = st.text_input("Cleaning frequency (e.g., 5x/week)", value="5x/week")
     trash_pickup = st.text_input("Trash pickup schedule", value="daily")
     day_porter_needed = st.selectbox("Day porter needed", ["No", "Yes"])
     restocking_needed = st.selectbox("Restocking needed", ["No", "Yes"])
     supplies_included = st.selectbox("Supplies included", ["No", "Yes"])
-    start_date = st.text_input("Target start date", value="")
 
-    st.header("Admin / Terms")
-    payment_terms = st.selectbox("Payment terms", ["Net 15", "Net 30", "Due on receipt", "Custom"])
-    custom_payment_terms = ""
-    if payment_terms == "Custom":
-        custom_payment_terms = st.text_input("Custom payment terms")
-    walkthrough_date = st.text_input("Walkthrough date (optional)", value="")
 
-# Main layout
+# Main columns
 c1, c2, c3 = st.columns(3)
 
 with c1:
     st.subheader("Facility details")
     space_type = st.text_input("Type of space (Office/Medical/etc.)", value="Office")
     square_footage = st.number_input("Square footage", min_value=0, step=100, value=0)
-    floor_types = st.text_area(
-        "Floor types (optional)",
-        placeholder="Carpet 7,600 sqft; VCT 30,000 sqft; Epoxy 50,000 sqft"
-    )
+    floor_types = st.text_area("Floor types (optional)", placeholder="Carpet 7,600 sqft; VCT 30,000 sqft; Epoxy 50,000 sqft")
 
 with c2:
     st.subheader("Room counts")
@@ -357,7 +342,6 @@ with c2:
 
 with c3:
     st.subheader("Pricing")
-
     pricing_mode = st.selectbox("Pricing method", ["Monthly Fixed", "Per Sq Ft", "Per Visit"])
 
     monthly_fixed_price = 0.0
@@ -371,19 +355,19 @@ with c3:
 
     elif pricing_mode == "Per Sq Ft":
         rate_per_sqft = st.number_input("Rate per sq ft ($/sqft)", min_value=0.0, step=0.001, format="%.4f", value=0.0000)
-        st.caption("This calculates: rate × square footage (as monthly base).")
+        st.caption("Calculates monthly base: rate × square footage.")
 
     else:
         rate_per_visit = st.number_input("Rate per visit ($/visit)", min_value=0.0, step=25.0, value=0.0)
-        visits_per_week = st.number_input("Visits per week", min_value=0.0, step=0.5, value=0.0)
+        visits_per_week = st.number_input("Visits per week", min_value=0.0, step=0.5, value=5.0)
         visits_per_month = compute_visits_per_month(float(visits_per_week))
-        st.caption(f"Estimated visits/month based on {visits_per_week:g}/week: {visits_per_month} (52 weeks / 12 months)")
+        st.caption(f"Estimated visits/month: {visits_per_month} (based on {visits_per_week:g}/week)")
 
     st.subheader("Deep clean")
     deep_clean_option = st.selectbox("Deep clean option", ["None", "One-time", "Quarterly"])
     deep_clean_price = 0.0
+    deep_clean_includes: List[str] = []
 
-    deep_clean_includes = []
     if deep_clean_option != "None":
         deep_clean_price = st.number_input("Deep clean price ($)", min_value=0.0, step=50.0, value=0.0)
         st.caption("Choose what the deep clean includes:")
@@ -404,117 +388,147 @@ with c3:
             if st.checkbox("Glass detailing"):
                 deep_clean_includes.append("Glass detailing (interior as applicable)")
 
-        if deep_clean_option == "Quarterly":
-            st.caption("Quarterly deep clean is shown as quarterly + monthly equivalent in the proposal.")
-
     st.subheader("Notes")
     notes = st.text_area("Notes (optional)", height=120)
 
+
 st.divider()
 
-# Additional services (line items)
+# Multi-address section
+st.subheader("Service Address(es)")
+st.caption("Add one or more addresses for this proposal.")
+
+if "service_addresses" not in st.session_state:
+    st.session_state.service_addresses = [""]  # start with one line
+
+for i, addr in enumerate(st.session_state.service_addresses):
+    ca, cb = st.columns([6, 1])
+    with ca:
+        st.session_state.service_addresses[i] = st.text_input(
+            f"service_addr_{i}",
+            value=addr,
+            label_visibility="collapsed",
+            placeholder="Street, City, State ZIP"
+        )
+    with cb:
+        if st.button("Remove", key=f"remove_addr_{i}") and len(st.session_state.service_addresses) > 1:
+            st.session_state.service_addresses.pop(i)
+            st.rerun()
+
+if st.button("Add another address"):
+    st.session_state.service_addresses.append("")
+    st.rerun()
+
+st.divider()
+
+# Additional services line items
 st.subheader("Additional services (add-ons)")
-st.caption("Add line items (example: Day porter hours, Strip & wax add-on, Carpet extraction add-on, Event cleanup).")
+st.caption("Add line items (example: Day porter hours, Event cleanup, Carpet extraction add-on).")
 
 if "addons" not in st.session_state:
     st.session_state.addons = [{"name": "", "price": 0.0}]
 
-col_add_a, col_add_b, col_add_c = st.columns([3, 1, 1])
-with col_add_a:
-    st.write("Service name")
-with col_add_b:
-    st.write("Price ($)")
-with col_add_c:
-    st.write("")
-
 for i, item in enumerate(st.session_state.addons):
     ca, cb, cc = st.columns([3, 1, 1])
     with ca:
-        st.session_state.addons[i]["name"] = st.text_input(f"addon_name_{i}", value=item["name"], label_visibility="collapsed")
+        st.session_state.addons[i]["name"] = st.text_input(f"addon_name_{i}", value=item["name"], placeholder="Service name", label_visibility="collapsed")
     with cb:
-        st.session_state.addons[i]["price"] = st.number_input(
-            f"addon_price_{i}",
-            min_value=0.0,
-            step=25.0,
-            value=float(item["price"]),
-            label_visibility="collapsed"
-        )
+        st.session_state.addons[i]["price"] = st.number_input(f"addon_price_{i}", min_value=0.0, step=25.0, value=float(item["price"]), label_visibility="collapsed")
     with cc:
-        if st.button("Remove", key=f"remove_addon_{i}"):
+        if st.button("Remove", key=f"remove_addon_{i}") and len(st.session_state.addons) > 1:
             st.session_state.addons.pop(i)
             st.rerun()
 
-col_btn1, col_btn2, col_btn3 = st.columns([1, 1, 2])
-with col_btn1:
-    if st.button("Add another line"):
+cbtn1, cbtn2, _ = st.columns([1, 2, 3])
+with cbtn1:
+    if st.button("Add another add-on"):
         st.session_state.addons.append({"name": "", "price": 0.0})
         st.rerun()
-with col_btn2:
-    include_addons_in_total = st.selectbox("Include add-ons in monthly total?", ["Yes", "No"])
-with col_btn3:
-    st.write("")
+with cbtn2:
+    include_addons_in_total = st.selectbox("Include add-ons in monthly total?", ["Yes", "No"], index=0)
 
-# Build inputs object
+
+# Compensation controls
+st.divider()
+st.subheader("Compensation")
+compensation_mode = st.selectbox("Compensation mode", ["Auto (calculated)", "Override"])
+compensation_override = 0.0
+if compensation_mode == "Override":
+    compensation_override = st.number_input("Compensation override ($ per month)", min_value=0.0, step=50.0, value=0.0)
+    st.caption("This is what will be shown as Compensation in the proposal, regardless of totals.")
+
+
+# Build proposal inputs
 p = ProposalInputs(
-    client_name=client_name.strip(),
+    client=client.strip(),
     facility_name=facility_name.strip(),
-    facility_address=facility_address.strip(),
     space_type=space_type.strip(),
     square_footage=int(square_footage),
+    floor_types=floor_types.strip(),
+
+    service_begin_date=service_begin_date.strip(),
+    service_end_date=service_end_date.strip(),
+    service_addresses=st.session_state.service_addresses,
+    days_per_week=int(days_per_week),
+    cleaning_times=cleaning_times.strip(),
+
     num_offices=int(num_offices),
     num_conference_rooms=int(num_conference_rooms),
     num_break_rooms=int(num_break_rooms),
     num_bathrooms=int(num_bathrooms),
     num_kitchens=int(num_kitchens),
     num_locker_rooms=int(num_locker_rooms),
-    floor_types=floor_types.strip(),
+
     cleaning_frequency=cleaning_frequency.strip(),
     day_porter_needed=day_porter_needed,
     trash_pickup=trash_pickup.strip(),
     restocking_needed=restocking_needed,
     supplies_included=supplies_included,
-    start_date=start_date.strip(),
-    notes=notes.strip(),
+
     pricing_mode=pricing_mode,
     monthly_fixed_price=float(monthly_fixed_price),
     rate_per_sqft=float(rate_per_sqft),
     rate_per_visit=float(rate_per_visit),
     visits_per_week=float(visits_per_week),
     visits_per_month=int(visits_per_month),
+
     deep_clean_option=deep_clean_option,
     deep_clean_price=float(deep_clean_price),
     deep_clean_includes=deep_clean_includes,
+
     additional_services=st.session_state.addons,
     include_addons_in_total=include_addons_in_total,
-    payment_terms=payment_terms,
-    custom_payment_terms=custom_payment_terms.strip(),
-    walkthrough_date=walkthrough_date.strip(),
+
+    sales_tax_percent=float(sales_tax_percent),
+    net_terms=int(net_terms),
+
+    compensation_mode=compensation_mode,
+    compensation_override=float(compensation_override),
+
+    notes=notes.strip(),
 )
 
 totals = build_totals(p)
 
-# Show computed totals
+# Totals display
 st.subheader("Calculated totals")
-ct1, ct2, ct3 = st.columns(3)
-ct1.metric("Base monthly", money(totals["base_monthly"]))
-ct2.metric("Add-ons total", money(totals["addons_total"]))
-ct3.metric("Estimated monthly total", money(totals["monthly_total"]))
+t1, t2, t3, t4 = st.columns(4)
+t1.metric("Monthly subtotal (pre-tax)", money(totals["monthly_subtotal"]))
+t2.metric("Sales tax (monthly)", money(totals["monthly_tax"]))
+t3.metric("Monthly total (with tax)", money(totals["monthly_total_with_tax"]))
+t4.metric("Compensation (monthly)", money(totals["compensation_monthly"]))
 
 if p.deep_clean_option == "One-time":
     st.info(f"One-time deep clean (separate): {money(totals['deep_clean_one_time'])}")
 elif p.deep_clean_option == "Quarterly":
-    st.info(
-        f"Quarterly deep clean: {money(totals['deep_clean_quarterly'])} per quarter "
-        f"(monthly equivalent {money(totals['deep_clean_monthly_equiv'])})"
-    )
+    st.info(f"Quarterly deep clean: {money(totals['deep_clean_quarterly'])} per quarter (monthly equivalent {money(totals['deep_clean_monthly_equiv'])})")
 
+# Preview + downloads
 st.divider()
 st.subheader("Preview")
-
 proposal_text = build_proposal_text(p)
-st.text_area("Generated proposal text", proposal_text, height=480)
+st.text_area("Generated proposal text", proposal_text, height=520)
 
-# Downloads
 colA, colB, colC = st.columns(3)
 with colA:
     st.download_button(
@@ -523,7 +537,6 @@ with colA:
         file_name=f"TorusGroup_Proposal_{datetime.date.today().isoformat()}.txt",
         mime="text/plain",
     )
-
 with colB:
     docx_data = docx_bytes_from_text(proposal_text)
     st.download_button(
@@ -532,7 +545,6 @@ with colB:
         file_name=f"TorusGroup_Proposal_{datetime.date.today().isoformat()}.docx",
         mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     )
-
 with colC:
     st.download_button(
         "Download inputs (.json)",
