@@ -170,6 +170,40 @@ def build_totals(p: ProposalInputs) -> dict:
 
 
 def build_proposal_text(p: ProposalInputs) -> str:
+    # Addresses (support multiple)
+    addresses = clean_address_list(p.service_addresses)
+    if addresses:
+        address_block_inline = "; ".join(addresses)  # for paragraph 1
+        address_block_lines = "\n".join([f"• {a}" for a in addresses])  # optional, if you ever want bullets
+    else:
+        address_block_inline = "(service address not provided)"
+        address_block_lines = "• (not provided)"
+
+    # Agreement Title + 3 paragraphs (exact language requested)
+    title = "CLEANING SERVICE AGREEMENT"
+
+    para1 = (
+        f"{p.client}, ('Client'), enters into this agreement on this date {p.agreement_date} "
+        f"for Torus Cleaning Services ('Contractor'), to provide janitorial services for "
+        f"facility/facilities located at the following locations: {address_block_inline}"
+    )
+
+    para2 = (
+        f"Contractor shall provide janitorial services {p.days_per_week} per week between "
+        f"the hours of {p.cleaning_times} for the facility/facilities located at {address_block_inline}."
+    )
+
+    para3 = (
+        f"The contract period is as follows {p.service_begin_date} to {p.service_end_date}."
+    )
+
+    # Keep your notes/add-ons/pricing below if you want — for now this is the agreement intro section.
+    # You can append more sections after this as needed.
+    return f"""\n\n{title}\n
+{para1}\n
+{para2}\n
+{para3}\n
+"""
     today = datetime.date.today().strftime("%B %d, %Y")
     totals = build_totals(p)
 
@@ -268,24 +302,34 @@ Authorized Signature: ___________________________    Date: _______________
 """
 
 
-def docx_bytes_from_text(text: str) -> bytes:
-    """
-    Uses proposal_template.docx if it exists (keeps your footer/header exactly).
-    If not present, generates a normal doc.
-    """
-    template_path = "proposal_template.docx"
-    if os.path.exists(template_path):
-        doc = Document(template_path)
-    else:
-        doc = Document()
+import os
+from docx.enum.text import WD_ALIGN_PARAGRAPH
 
-    for line in text.splitlines():
-        if line.strip() and line == line.upper() and len(line) <= 90:
-            para = doc.add_paragraph()
-            run = para.add_run(line)
+
+def docx_bytes_from_text(text: str) -> bytes:
+    template_path = "proposal_template.docx"
+    doc = Document(template_path) if os.path.exists(template_path) else Document()
+
+    lines = text.splitlines()
+
+    for idx, line in enumerate(lines):
+        line_stripped = line.strip()
+
+        # Skip empty lines but preserve spacing by adding blank paragraphs
+        if not line_stripped:
+            doc.add_paragraph("")
+            continue
+
+        # Title formatting
+        if line_stripped == "CLEANING SERVICE AGREEMENT":
+            p = doc.add_paragraph()
+            p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            run = p.add_run(line_stripped)
             run.bold = True
-        else:
-            doc.add_paragraph(line)
+            continue
+
+        # Normal paragraph
+        doc.add_paragraph(line_stripped)
 
     bio = BytesIO()
     doc.save(bio)
