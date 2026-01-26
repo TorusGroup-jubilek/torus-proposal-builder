@@ -3,33 +3,43 @@ import os
 from dataclasses import dataclass, asdict
 from io import BytesIO
 from typing import List, Dict, Optional
-import pandas as pd
+
 import streamlit as st
+import pandas as pd
 from docx import Document
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.enum.table import WD_TABLE_ALIGNMENT
 
 
 COMPANY_NAME = "Torus Group"
+CHECK = "✓"
 
 
-# ---------------- Data ----------------
+# =========================
+# Data Model
+# =========================
 
 @dataclass
 class ProposalInputs:
-    # Core
+    # Agreement / client
     client: str
     facility_name: str
-    space_type: str
-    square_footage: int
-    floor_types: str
-
-    # Service details
     service_begin_date: str
     service_end_date: str
     service_addresses: List[str]
     days_per_week: int
     cleaning_times: str
+    net_terms: int
 
-    # Rooms
+    # Tax
+    sales_tax_percent: float
+
+    # Facility details
+    space_type: str
+    square_footage: int
+    floor_types: str
+
+    # Room counts
     num_offices: int
     num_conference_rooms: int
     num_break_rooms: int
@@ -42,6 +52,8 @@ class ProposalInputs:
     day_porter_needed: str  # Yes/No
     trash_pickup: str
     restocking_needed: str  # Yes/No
+
+    # Consumables (replaces "supplies included")
     hand_soap: str
     paper_towels: str
     toilet_paper: str
@@ -50,10 +62,9 @@ class ProposalInputs:
     pricing_mode: str  # Monthly Fixed | Per Sq Ft | Per Visit
     monthly_fixed_price: float
     rate_per_sqft: float
-
     rate_per_visit: float
     visits_per_week: float
-    visits_per_month: int  # computed/displayed
+    visits_per_month: int  # computed
 
     # Deep clean
     deep_clean_option: str  # None | One-time | Quarterly
@@ -64,10 +75,6 @@ class ProposalInputs:
     additional_services: List[Dict[str, float]]  # [{"name": str, "price": float}]
     include_addons_in_total: str  # Yes/No
 
-    # Tax / payment
-    sales_tax_percent: float
-    net_terms: int  # 15/30/45/60
-
     # Compensation
     compensation_mode: str  # Auto (calculated) | Override
     compensation_override: float
@@ -76,24 +83,31 @@ class ProposalInputs:
     notes: str
 
 
-# ---------------- Helpers ----------------
+# =========================
+# Helpers
+# =========================
 
 def money(x: float) -> str:
     return f"${x:,.2f}"
 
 
 def compute_visits_per_month(visits_per_week: float) -> int:
-    # 52 weeks / 12 months ≈ 4.3333
-    return int(round(visits_per_week * (52.0 / 12.0)))
+    # 52 weeks / 12 months ≈ 4.3333 weeks/month
+    return int(round(float(visits_per_week) * (52.0 / 12.0)))
 
 
-def clean_address_list(items: List[str]) -> List[str]:
+def clean_list(items: List[str]) -> List[str]:
     out = []
     for s in items:
         s2 = (s or "").strip()
         if s2:
             out.append(s2)
     return out
+
+
+def _has_keyword(text: str, keywords) -> bool:
+    t = (text or "").lower()
+    return any(k.lower() in t for k in keywords)
 
 
 def build_totals(p: ProposalInputs) -> dict:
@@ -126,7 +140,7 @@ def build_totals(p: ProposalInputs) -> dict:
     include_addons = (p.include_addons_in_total == "Yes")
     addons_included_monthly = addons_total if include_addons else 0.0
 
-    # Deep clean handling
+    # Deep clean
     deep_clean_one_time = 0.0
     deep_clean_quarterly = 0.0
     deep_clean_monthly_equiv = 0.0
@@ -140,12 +154,12 @@ def build_totals(p: ProposalInputs) -> dict:
     # Subtotal (monthly)
     monthly_subtotal = base_monthly + addons_included_monthly + deep_clean_monthly_equiv
 
-    # Sales tax (monthly)
+    # Tax
     tax_rate = max(0.0, float(p.sales_tax_percent)) / 100.0
     monthly_tax = monthly_subtotal * tax_rate
     monthly_total_with_tax = monthly_subtotal + monthly_tax
 
-    # Compensation display (monthly)
+    # Compensation
     if p.compensation_mode == "Override":
         compensation_monthly = float(p.compensation_override)
         compensation_explain = f"Compensation (override): {money(compensation_monthly)}"
@@ -171,323 +185,16 @@ def build_totals(p: ProposalInputs) -> dict:
     }
 
 
-def build_proposal_text(p: ProposalInputs) -> str:
-    # Addresses (support multiple)
-    addresses = clean_address_list(p.service_addresses)
-    if addresses:
-        address_block_inline = "; ".join(addresses)  # for paragraph 1
-        address_block_lines = "\n".join([f"• {a}" for a in addresses])  # optional, if you ever want bullets
-    else:
-        address_block_inline = "(service address not provided)"
-        address_block_lines = "• (not provided)"
+# =========================
+# Dynamic schedule (recommended) + tuning
+# =========================
 
-    # Agreement Title + 3 paragraphs (exact language requested)
-    title = "CLEANING SERVICE AGREEMENT"
-
-    para1 = (
-        f"{p.client}, ('Client'), enters into this agreement on this date "
-        f"______________ for Torus Cleaning Services ('Contractor'), to provide "
-        f"janitorial services for facility/facilities located at the following "
-        f"locations: {address_block_inline}"
-    )
-
-    para2 = (
-        f"Contractor shall provide janitorial services {p.days_per_week} per week between "
-        f"the hours of {p.cleaning_times} for the facility/facilities located at {address_block_inline}."
-    )
-
-    para3 = (
-        f"The contract period is as follows {p.service_begin_date} to {p.service_end_date}."
-    )
-
-    # Keep your notes/add-ons/pricing below if you want — for now this is the agreement intro section.
-    # You can append more sections after this as needed.
-
-    supplies_block = (
-    f"Consumable supplies:\n"
-    f"• Hand soap: {p.hand_soap}\n"
-    f"• Paper towels: {p.paper_towels}\n"
-    f"• Toilet paper: {p.toilet_paper}"
-)
-
-    general_requirements_block = (
-    "GENERAL REQUIREMENTS\n"
-    "Contractor shall provide all labor, supervision, and personnel necessary "
-    "to perform the janitorial services described in this agreement.\n\n"
-    "Unless otherwise stated below, all cleaning equipment and standard janitorial "
-    "supplies required to perform the services shall be provided by the Contractor.\n\n"
-    "Consumable supplies:\n"
-    f"• Hand soap: {p.hand_soap}\n"
-    f"• Paper towels: {p.paper_towels}\n"
-    f"• Toilet paper: {p.toilet_paper}"
-)
-
-    # --- General Requirements (uses consumable supply inputs) ---
-general_requirements_block = (
-    "GENERAL REQUIREMENTS\n"
-    "Contractor shall provide all labor, supervision, and personnel necessary "
-    "to perform the janitorial services described in this agreement.\n\n"
-    "Unless otherwise stated below, all cleaning equipment and standard janitorial "
-    "supplies required to perform the services shall be provided by the Contractor.\n\n"
-    "Consumable supplies:\n"
-    f"• Hand soap: {p.hand_soap}\n"
-    f"• Paper towels: {p.paper_towels}\n"
-    f"• Toilet paper: {p.toilet_paper}\n"
-)
-
-# --- Insurance & Liability ---
-insurance_block = (
-    "INSURANCE & LIABILITY\n"
-    "Contractor shall maintain insurance customary for janitorial service providers, "
-    "including general liability and workers’ compensation as required by law.\n\n"
-    "Upon request, Contractor may provide a certificate of insurance.\n\n"
-    "Each party shall be responsible for its own acts and omissions and those of its employees and subcontractors.\n"
-)
-
-# --- Access, Security, Keys/Badges ---
-access_security_block = (
-    "ACCESS & SECURITY\n"
-    "Client shall provide Contractor with reasonable access to the facility/facilities during the agreed cleaning times, "
-    "including access to water and electrical service as needed.\n\n"
-    "If keys, fobs, alarm codes, or badges are issued, Contractor will take reasonable care to safeguard them "
-    "and will return them upon termination of this agreement.\n\n"
-    "Client shall notify Contractor of any site-specific security procedures, restricted areas, or check-in/check-out requirements.\n"
-)
-
-# --- Damages, Client Property, Exclusions ---
-damages_exclusions_block = (
-    "DAMAGES, CLIENT PROPERTY & EXCLUSIONS\n"
-    "Contractor shall exercise reasonable care while performing services. Client agrees to secure or remove fragile, "
-    "high-value, or sensitive items. Contractor is not responsible for normal wear and tear.\n\n"
-    "Contractor is not responsible for pre-existing conditions (including but not limited to stained carpet, damaged flooring, "
-    "peeling finishes, or cracked tile) or damage resulting from defective surfaces/materials.\n\n"
-    "Services do not include hazardous materials handling, mold remediation, biohazard cleanup, or specialized restoration work "
-    "unless specifically listed in writing as an additional service.\n"
-)
-
-# --- Termination, Changes, and Suspension of Service ---
-termination_block = (
-    "TERM, TERMINATION & CHANGES\n"
-    "This agreement remains in effect for the contract period stated above unless terminated earlier in accordance with this section.\n\n"
-    "Either party may terminate this agreement with written notice. Unless otherwise agreed in writing, a notice period of 30 days applies.\n\n"
-    "Client may request changes to scope, frequency, or locations. Any material change may require a written adjustment to pricing.\n\n"
-    "Contractor may suspend services for non-payment after providing written notice and a reasonable opportunity to cure.\n"
-)
-
-# --- Payment Terms, Taxes, Late Fees ---
-# Uses p.net_terms and p.sales_tax_percent
-payment_block = (
-    "PAYMENT TERMS, TAXES & LATE FEES\n"
-    f"Client shall pay Contractor according to the agreed compensation and pricing. Payment terms are Net {p.net_terms}.\n\n"
-    f"Sales tax will be applied where required at {p.sales_tax_percent:.2f}%.\n\n"
-    "Past due balances may be subject to a late charge of 1.5% per month (or the maximum allowed by law, whichever is less), "
-    "plus reasonable collection costs.\n"
-)
-
-# --- Entire Agreement / Order of Precedence ---
-entire_agreement_block = (
-    "ENTIRE AGREEMENT\n"
-    "This document constitutes the entire agreement between the parties regarding the services described and supersedes all prior "
-    "discussions or representations. Any amendments must be in writing and signed by both parties.\n"
-)
-    
-    return f"""\n\n{title}\n
-return f"""\n\nCLEANING SERVICE AGREEMENT\n
-{para1}\n
-{para2}\n
-{para3}\n
-
-{general_requirements_block}
-
-{SCOPE_OF_WORK_TABLE}
-
-{insurance_block}
-
-{access_security_block}
-
-{damages_exclusions_block}
-
-{termination_block}
-
-{payment_block}
-
-{entire_agreement_block}
-
-ACCEPTANCE
-Client Authorized Signature: ___________________________    Date: _______________
-
-Contractor Authorized Signature: _______________________    Date: _______________
-"""
-    today = datetime.date.today().strftime("%B %d, %Y")
-    totals = build_totals(p)
-
-    addresses = clean_address_list(p.service_addresses)
-    address_block = "\n".join([f"• {a}" for a in addresses]) if addresses else "• (not provided)"
-
-    floor_note = f"Floor types/notes: {p.floor_types}" if p.floor_types.strip() else "Floor types/notes: N/A"
-
-    scope_lines = [
-        "• Empty trash/recycling; replace liners as needed",
-        "• Dust and wipe accessible surfaces (desks, ledges, counters)",
-        "• Clean and disinfect high-touch points (door handles, switches, etc.)",
-        "• Vacuum carpeted areas; spot clean as needed",
-        "• Damp mop hard floors; detail as required by floor type",
-        "• Clean and disinfect bathrooms; refill soap/paper as applicable",
-        "• Break rooms/kitchens: wipe counters, clean sinks, exterior of appliances",
-    ]
-    if p.num_conference_rooms > 0:
-        scope_lines.append("• Conference rooms: wipe tables, straighten, vacuum/mop")
-    if p.num_locker_rooms > 0:
-        scope_lines.append("• Locker rooms: clean/disinfect, mop floors, touchpoint disinfection")
-    if p.day_porter_needed == "Yes":
-        scope_lines.append("• Day porter support (restroom checks, spills, touchpoints, common areas)")
-    if p.restocking_needed == "Yes":
-        scope_lines.append("• Restocking of consumables (client-provided unless supplies included)")
-
-    # Pricing summary
-    pricing_lines = [f"• Base service: {totals['base_explain']}"]
-
-    if totals["include_addons"]:
-        pricing_lines.append(f"• Additional services (included): {money(totals['addons_total'])} per month")
-    else:
-        pricing_lines.append(
-            f"• Additional services (not included in total): {money(totals['addons_total'])}"
-            if totals["addons_total"] > 0 else
-            "• Additional services: None"
-        )
-
-    if p.deep_clean_option == "One-time":
-        pricing_lines.append(f"• One-time deep clean: {money(totals['deep_clean_one_time'])} (one-time)")
-    elif p.deep_clean_option == "Quarterly":
-        pricing_lines.append(f"• Quarterly deep clean: {money(totals['deep_clean_quarterly'])} per quarter")
-        pricing_lines.append(f"• Quarterly deep clean monthly equivalent: {money(totals['deep_clean_monthly_equiv'])}/month")
-
-    pricing_lines.append(f"• Monthly subtotal (pre-tax): {money(totals['monthly_subtotal'])}")
-    pricing_lines.append(f"• Sales tax ({p.sales_tax_percent:.2f}%): {money(totals['monthly_tax'])}")
-    pricing_lines.append(f"• Monthly total (with tax): {money(totals['monthly_total_with_tax'])}")
-    pricing_lines.append(f"• {totals['compensation_explain']}")
-
-    deep_clean_block = ""
-    if p.deep_clean_option != "None" and p.deep_clean_includes:
-        deep_clean_block = "\nDEEP CLEAN INCLUDES\n" + "\n".join([f"• {x}" for x in p.deep_clean_includes]) + "\n"
-
-    addon_detail_block = ""
-    if totals["addons_lines"]:
-        addon_detail_block = "\nADDITIONAL SERVICES (LINE ITEMS)\n" + "\n".join(totals["addons_lines"]) + "\n"
-
-    return f"""JANITORIAL SERVICES PROPOSAL
-{COMPANY_NAME}
-Date: {today}
-
-CLIENT / SERVICE INFO
-Client: {p.client}
-Facility/Location Name: {p.facility_name}
-Service begin date: {p.service_begin_date}
-Service end date: {p.service_end_date}
-Number of days per week: {p.days_per_week}
-Cleaning times: {p.cleaning_times}
-Net pay terms: Net {p.net_terms}
-
-SERVICE ADDRESSES
-{address_block}
-
-FACILITY OVERVIEW
-• Space type: {p.space_type}
-• Approx. square footage: {p.square_footage:,} sqft
-• Offices: {p.num_offices}
-• Conference rooms: {p.num_conference_rooms}
-• Break rooms: {p.num_break_rooms}
-• Bathrooms: {p.num_bathrooms}
-• Kitchens: {p.num_kitchens}
-• Locker rooms: {p.num_locker_rooms}
-• {floor_note}
-
-SCOPE OF WORK (SUMMARY)
-{chr(10).join(scope_lines)}
-
-PRICING SUMMARY
-{chr(10).join(pricing_lines)}
-{deep_clean_block}{addon_detail_block}
-NOTES
-{p.notes if p.notes.strip() else "(none)"}
-
-ACCEPTANCE
-Authorized Signature: ___________________________    Date: _______________
-"""
-
-
-import os
-from docx.enum.table import WD_TABLE_ALIGNMENT
-
-def add_scope_of_work_table(doc):
-    doc.add_paragraph("SCOPE OF WORK – CLEANING SCHEDULE").runs[0].bold = True
-
-    table = doc.add_table(rows=1, cols=4)
-    table.alignment = WD_TABLE_ALIGNMENT.LEFT
-    table.style = "Table Grid"
-
-    hdr_cells = table.rows[0].cells
-    hdr_cells[0].text = "Task"
-    hdr_cells[1].text = "Daily"
-    hdr_cells[2].text = "Weekly"
-    hdr_cells[3].text = "Monthly"
-
-    tasks = [
-        ("Empty trash & replace liners", "✓", "", ""),
-        ("Clean & disinfect restrooms", "✓", "", ""),
-        ("Clean sinks, counters & fixtures", "✓", "", ""),
-        ("Vacuum carpeted areas", "✓", "", ""),
-        ("Spot clean glass & mirrors", "✓", "", ""),
-        ("Dust horizontal surfaces", "", "✓", ""),
-        ("Damp mop hard floors", "", "✓", ""),
-        ("Detail break room / kitchen cleaning", "", "✓", ""),
-        ("High dusting (vents, ledges, corners)", "", "", "✓"),
-        ("Detail floor scrubbing / machine scrub", "", "", "✓"),
-    ]
-
-    for task, daily, weekly, monthly in tasks:
-        row_cells = table.add_row().cells
-        row_cells[0].text = task
-        row_cells[1].text = daily
-        row_cells[2].text = weekly
-        row_cells[3].text = monthly
-
-    doc.add_paragraph("")  # spacing after table
-
-
-import os
-
-from docx.enum.table import WD_TABLE_ALIGNMENT
-
-CHECK = "✓"
-
-
-def _has_keyword(text: str, keywords) -> bool:
-    t = (text or "").lower()
-    return any(k.lower() in t for k in keywords)
-
-
-def compute_cleaning_schedule(p) -> list:
+def compute_cleaning_schedule(p: ProposalInputs) -> list:
     """
-    Returns list of rows: (task, daily, weekly, monthly)
-    Uses p.days_per_week, room counts, floor_types, and options.
+    Returns rows: (task, daily_check, weekly_check, monthly_check)
+    Uses p.days_per_week, room counts, floor types, and options.
     """
     d = int(p.days_per_week or 0)
-
-    # Helper: decide if something is "daily" vs "weekly" based on how many days/week
-    def freq_for_core():
-        # If they clean 5+ days/week, core items are daily.
-        # If 3-4, many core items still get "Daily" (on service days) but some shift to weekly.
-        # If 1-2, core items typically weekly.
-        if d >= 5:
-            return "daily"
-        if d >= 3:
-            return "daily"
-        if d >= 1:
-            return "weekly"
-        return "weekly"
-
-    core_freq = freq_for_core()
 
     # Floors keyword detection
     has_carpet = _has_keyword(p.floor_types, ["carpet"])
@@ -498,67 +205,79 @@ def compute_cleaning_schedule(p) -> list:
 
     rows = []
 
-    # --- Core tasks (almost always included) ---
-    rows.append(("Empty trash & replace liners", CHECK if core_freq == "daily" else "", CHECK if core_freq == "weekly" else "", ""))
-    rows.append(("Clean/disinfect high-touch points (handles, switches, rails)", CHECK if core_freq == "daily" else "", CHECK if core_freq == "weekly" else "", ""))
+    # Core
+    rows.append(("Empty trash & replace liners", CHECK if d >= 3 else "", CHECK if d in (1, 2) else "", ""))
+    rows.append(("Clean/disinfect high-touch points (handles, switches, rails)", CHECK if d >= 3 else "", CHECK if d in (1, 2) else "", ""))
 
     # Restrooms
     if int(p.num_bathrooms or 0) > 0:
-        # Restrooms usually daily when 3+ days/week; weekly when 1-2
-        rr_daily = CHECK if d >= 3 else ""
-        rr_weekly = CHECK if d in (1, 2) else ""
-        rows.append(("Clean & disinfect restrooms; restock as applicable", rr_daily, rr_weekly, ""))
+        rows.append(("Clean & disinfect restrooms; restock as applicable", CHECK if d >= 3 else "", CHECK if d in (1, 2) else "", ""))
 
     # Break rooms / kitchens
     if int(p.num_break_rooms or 0) > 0 or int(p.num_kitchens or 0) > 0:
-        br_daily = CHECK if d >= 5 else ""
-        br_weekly = CHECK if d in (1, 2, 3, 4) else ""
-        rows.append(("Break rooms/kitchens: counters, sinks, exterior appliances", br_daily, br_weekly, ""))
+        rows.append(("Break rooms/kitchens: counters, sinks, exterior appliances", CHECK if d >= 5 else "", CHECK if d in (1, 2, 3, 4) else "", ""))
 
-    # Dusting
-    # Dusting is usually weekly unless service is daily.
-    rows.append(("Dust horizontal surfaces (accessible)", CHECK if d >= 5 else "", CHECK if d in (1,2,3,4) else "", ""))
+    # Dusting & glass
+    rows.append(("Dust horizontal surfaces (accessible)", CHECK if d >= 5 else "", CHECK if d in (1, 2, 3, 4) else "", ""))
+    rows.append(("Spot clean glass & mirrors (interior)", CHECK if d >= 5 else "", CHECK if d in (1, 2, 3, 4) else "", ""))
 
-    # Floors
+    # Carpet
     if has_carpet:
-        rows.append(("Vacuum carpeted areas (as applicable)", CHECK if d >= 3 else "", CHECK if d in (1,2) else "", ""))
-        rows.append(("Spot treat carpet stains (as needed)", CHECK if d >= 5 else "", CHECK if d in (1,2,3,4) else "", ""))
+        rows.append(("Vacuum carpeted areas (as applicable)", CHECK if d >= 3 else "", CHECK if d in (1, 2) else "", ""))
+        rows.append(("Spot treat carpet stains (as needed)", CHECK if d >= 5 else "", CHECK if d in (1, 2, 3, 4) else "", ""))
         rows.append(("Carpet extraction / shampoo (as scheduled)", "", "", CHECK))
 
+    # Hard floors
     if hard_floors:
-        rows.append(("Damp mop hard floors (as applicable)", CHECK if d >= 5 else "", CHECK if d in (1,2,3,4) else "", ""))
+        rows.append(("Damp mop hard floors (as applicable)", CHECK if d >= 5 else "", CHECK if d in (1, 2, 3, 4) else "", ""))
         rows.append(("Detail floor scrubbing / machine scrub", "", CHECK if d >= 3 else "", CHECK))
 
-    # Glass / mirrors
-    rows.append(("Spot clean glass & mirrors (interior)", CHECK if d >= 5 else "", CHECK if d in (1,2,3,4) else "", ""))
-
-    # Monthly items
+    # Monthly details
     rows.append(("High dusting (vents, ledges, corners)", "", "", CHECK))
     rows.append(("Baseboards / detail edges (as applicable)", "", "", CHECK))
 
-    # VCT extras (optional schedule)
+    # VCT extras
     if has_vct:
         rows.append(("VCT maintenance (buff/burnish if applicable)", "", "", CHECK))
         rows.append(("Strip & wax (as quoted/needed)", "", "", CHECK))
 
-    # Locker rooms (if present)
+    # Locker rooms
     if int(p.num_locker_rooms or 0) > 0:
-        rows.append(("Locker rooms: clean/disinfect & mop", CHECK if d >= 3 else "", CHECK if d in (1,2) else "", ""))
+        rows.append(("Locker rooms: clean/disinfect & mop", CHECK if d >= 3 else "", CHECK if d in (1, 2) else "", ""))
 
-    # Day porter note (if yes, we add a line item)
-    if getattr(p, "day_porter_needed", "No") == "Yes":
+    # Day porter
+    if p.day_porter_needed == "Yes":
         rows.append(("Day porter tasks (restroom checks, spills, touch-ups)", CHECK, "", ""))
 
-    # If deep clean option is on, add a deep clean row
-    if getattr(p, "deep_clean_option", "None") != "None":
-        # One-time deep clean isn't monthly, but quarterly is a cadence; we’ll show it under Monthly as "scheduled".
+    # Deep clean note
+    if p.deep_clean_option != "None":
         rows.append(("Deep clean tasks (per agreement)", "", "", CHECK))
 
-    # Convert frequencies into checkmarks (already done), and return
     return rows
 
 
-def add_scope_of_work_table(doc, p, schedule_rows: Optional[list] = None):
+def schedule_rows_to_df(rows: list) -> pd.DataFrame:
+    # Convert checkmarks to booleans for editing
+    return pd.DataFrame(
+        [(t, d == CHECK, w == CHECK, m == CHECK) for (t, d, w, m) in rows],
+        columns=["Task", "Daily", "Weekly", "Monthly"]
+    )
+
+
+def df_to_schedule_rows(df: pd.DataFrame) -> list:
+    rows = []
+    for _, r in df.iterrows():
+        task = str(r.get("Task", "")).strip()
+        if not task:
+            continue
+        daily = CHECK if bool(r.get("Daily", False)) else ""
+        weekly = CHECK if bool(r.get("Weekly", False)) else ""
+        monthly = CHECK if bool(r.get("Monthly", False)) else ""
+        rows.append((task, daily, weekly, monthly))
+    return rows
+
+
+def add_scope_of_work_table(doc: Document, schedule_rows: list):
     title_p = doc.add_paragraph()
     title_run = title_p.add_run("SCOPE OF WORK – CLEANING SCHEDULE")
     title_run.bold = True
@@ -573,9 +292,7 @@ def add_scope_of_work_table(doc, p, schedule_rows: Optional[list] = None):
     hdr[2].text = "Weekly"
     hdr[3].text = "Monthly"
 
-    rows = schedule_rows if schedule_rows else compute_cleaning_schedule(p)
-
-    for task, daily, weekly, monthly in rows:
+    for task, daily, weekly, monthly in schedule_rows:
         row = table.add_row().cells
         row[0].text = task
         row[1].text = daily
@@ -584,10 +301,176 @@ def add_scope_of_work_table(doc, p, schedule_rows: Optional[list] = None):
 
     doc.add_paragraph("")
 
-import os
-from docx.enum.text import WD_ALIGN_PARAGRAPH
 
-def docx_bytes_from_text(text: str, p, schedule_rows) -> bytes:
+# =========================
+# Agreement text (with placeholder)
+# =========================
+
+def build_agreement_text(p: ProposalInputs) -> str:
+    totals = build_totals(p)
+    addresses = clean_list(p.service_addresses)
+    address_inline = "; ".join(addresses) if addresses else "(service address not provided)"
+
+    today = datetime.date.today().strftime("%B %d, %Y")
+    floor_note = p.floor_types.strip() if p.floor_types.strip() else "N/A"
+
+    # Title + required 3 paragraphs (your exact language; date left blank)
+    para1 = (
+        f"{p.client}, ('Client'), enters into this agreement on this date "
+        f"______________ for Torus Cleaning Services ('Contractor'), to provide "
+        f"janitorial services for facility/facilities located at the following locations: {address_inline}"
+    )
+    para2 = (
+        f"Contractor shall provide janitorial services {p.days_per_week} per week between the hours of "
+        f"{p.cleaning_times} for the facility/facilities located at {address_inline}."
+    )
+    para3 = (
+        f"The contract period is as follows {p.service_begin_date} to {p.service_end_date}."
+    )
+
+    # General Requirements (uses consumable inputs + supervision/personnel)
+    general_requirements_block = (
+        "GENERAL REQUIREMENTS\n"
+        "Contractor shall provide all labor, supervision, and personnel necessary to perform the janitorial services "
+        "described in this agreement.\n\n"
+        "Unless otherwise stated below, all cleaning equipment and standard janitorial supplies required to perform "
+        "the services shall be provided by the Contractor.\n\n"
+        "Consumable supplies:\n"
+        f"• Hand soap: {p.hand_soap}\n"
+        f"• Paper towels: {p.paper_towels}\n"
+        f"• Toilet paper: {p.toilet_paper}\n"
+    )
+
+    insurance_block = (
+        "INSURANCE & LIABILITY\n"
+        "Contractor shall maintain insurance customary for janitorial service providers, including general liability "
+        "and workers’ compensation as required by law.\n\n"
+        "Upon request, Contractor may provide a certificate of insurance.\n\n"
+        "Each party shall be responsible for its own acts and omissions and those of its employees and subcontractors.\n"
+    )
+
+    access_security_block = (
+        "ACCESS & SECURITY\n"
+        "Client shall provide Contractor with reasonable access to the facility/facilities during the agreed cleaning times, "
+        "including access to water and electrical service as needed.\n\n"
+        "If keys, fobs, alarm codes, or badges are issued, Contractor will take reasonable care to safeguard them "
+        "and will return them upon termination of this agreement.\n\n"
+        "Client shall notify Contractor of any site-specific security procedures, restricted areas, or check-in/check-out requirements.\n"
+    )
+
+    damages_exclusions_block = (
+        "DAMAGES, CLIENT PROPERTY & EXCLUSIONS\n"
+        "Contractor shall exercise reasonable care while performing services. Client agrees to secure or remove fragile, "
+        "high-value, or sensitive items. Contractor is not responsible for normal wear and tear.\n\n"
+        "Contractor is not responsible for pre-existing conditions (including but not limited to stained carpet, damaged flooring, "
+        "peeling finishes, or cracked tile) or damage resulting from defective surfaces/materials.\n\n"
+        "Services do not include hazardous materials handling, mold remediation, biohazard cleanup, or specialized restoration work "
+        "unless specifically listed in writing as an additional service.\n"
+    )
+
+    termination_block = (
+        "TERM, TERMINATION & CHANGES\n"
+        "This agreement remains in effect for the contract period stated above unless terminated earlier in accordance with this section.\n\n"
+        "Either party may terminate this agreement with written notice. Unless otherwise agreed in writing, a notice period of 30 days applies.\n\n"
+        "Client may request changes to scope, frequency, or locations. Any material change may require a written adjustment to pricing.\n\n"
+        "Contractor may suspend services for non-payment after providing written notice and a reasonable opportunity to cure.\n"
+    )
+
+    payment_block = (
+        "PAYMENT TERMS, TAXES & LATE FEES\n"
+        f"Payment terms are Net {p.net_terms}. Sales tax will be applied where required at {p.sales_tax_percent:.2f}%.\n\n"
+        "Past due balances may be subject to a late charge of 1.5% per month (or the maximum allowed by law, whichever is less), "
+        "plus reasonable collection costs.\n"
+    )
+
+    entire_agreement_block = (
+        "ENTIRE AGREEMENT\n"
+        "This document constitutes the entire agreement between the parties regarding the services described and supersedes all prior "
+        "discussions or representations. Any amendments must be in writing and signed by both parties.\n"
+    )
+
+    # Pricing/compensation summary (kept in the agreement so it’s crystal clear)
+    pricing_block = (
+        "PRICING & COMPENSATION\n"
+        f"Base service pricing: {totals['base_explain']}\n"
+        f"Additional services total: {money(totals['addons_total'])} "
+        f"({'included in monthly total' if totals['include_addons'] else 'not included in monthly total'})\n"
+        f"Monthly subtotal (pre-tax): {money(totals['monthly_subtotal'])}\n"
+        f"Sales tax ({p.sales_tax_percent:.2f}%): {money(totals['monthly_tax'])}\n"
+        f"Monthly total (with tax): {money(totals['monthly_total_with_tax'])}\n"
+        f"{totals['compensation_explain']}\n"
+    )
+
+    deep_clean_block = ""
+    if p.deep_clean_option != "None":
+        if p.deep_clean_option == "One-time":
+            deep_clean_block += f"Deep clean (one-time): {money(totals['deep_clean_one_time'])}\n"
+        else:
+            deep_clean_block += f"Deep clean (quarterly): {money(totals['deep_clean_quarterly'])} per quarter\n"
+        if p.deep_clean_includes:
+            deep_clean_block += "Deep clean includes:\n" + "\n".join([f"• {x}" for x in p.deep_clean_includes]) + "\n"
+
+    add_on_block = ""
+    if totals["addons_lines"]:
+        add_on_block = "ADDITIONAL SERVICES (LINE ITEMS)\n" + "\n".join(totals["addons_lines"]) + "\n"
+
+    # Agreement text (note leading blank lines to sit under your template header)
+    return f"""
+\n\nCLEANING SERVICE AGREEMENT
+
+Date prepared: {today}
+
+Client / Location Name: {p.client}
+Facility/Location Name: {p.facility_name}
+Service Address(es): {address_inline}
+
+{para1}
+
+{para2}
+
+{para3}
+
+SCOPE_OF_WORK_TABLE
+
+{general_requirements_block}
+
+{pricing_block}
+{deep_clean_block}
+{add_on_block}
+
+Facility details:
+• Space type: {p.space_type}
+• Approx. square footage: {p.square_footage:,} sqft
+• Floor types/notes: {floor_note}
+
+{insurance_block}
+
+{access_security_block}
+
+{damages_exclusions_block}
+
+{termination_block}
+
+{payment_block}
+
+{entire_agreement_block}
+
+NOTES
+{p.notes if p.notes.strip() else "(none)"}
+
+ACCEPTANCE
+
+Client Authorized Signature: _______________________________    Date: _______________
+
+Contractor Authorized Signature: ___________________________   Date: _______________
+""".strip()
+
+
+# =========================
+# Word export (uses template if present)
+# =========================
+
+def docx_from_agreement(text: str, schedule_rows: list) -> bytes:
     template_path = "proposal_template.docx"
     doc = Document(template_path) if os.path.exists(template_path) else Document()
 
@@ -599,15 +482,14 @@ def docx_bytes_from_text(text: str, p, schedule_rows) -> bytes:
             continue
 
         if s == "CLEANING SERVICE AGREEMENT":
-            para = doc.add_paragraph()
-            para.alignment = WD_ALIGN_PARAGRAPH.CENTER
-            run = para.add_run(s)
+            p = doc.add_paragraph()
+            p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            run = p.add_run(s)
             run.bold = True
             continue
 
-        # Inject the dynamic table where the placeholder appears
         if s == "SCOPE_OF_WORK_TABLE":
-            add_scope_of_work_table(doc, p, schedule_rows=schedule_rows)
+            add_scope_of_work_table(doc, schedule_rows)
             continue
 
         doc.add_paragraph(s)
@@ -616,12 +498,14 @@ def docx_bytes_from_text(text: str, p, schedule_rows) -> bytes:
     doc.save(bio)
     return bio.getvalue()
 
-# ---------------- UI ----------------
 
-st.set_page_config(page_title=f"{COMPANY_NAME} Proposal Builder", layout="wide")
-st.title(f"{COMPANY_NAME} — Proposal Builder")
+# =========================
+# UI
+# =========================
 
-# Sidebar
+st.set_page_config(page_title=f"{COMPANY_NAME} Agreement Builder", layout="wide")
+st.title(f"{COMPANY_NAME} — Cleaning Service Agreement Builder")
+
 with st.sidebar:
     st.header("Client / Contract")
     client = st.text_input("Client (legal name)")
@@ -631,34 +515,23 @@ with st.sidebar:
     service_end_date = st.text_input("Service end date")
 
     net_terms = st.selectbox("Net pay terms", [15, 30, 45, 60], index=1)
-
     days_per_week = st.number_input("Number of days per week", min_value=0, step=1, value=5)
     cleaning_times = st.text_input("Cleaning times (e.g., 6:00 PM – 10:00 PM)")
 
     st.header("Sales Tax")
     sales_tax_percent = st.number_input("Sales tax (%)", min_value=0.0, step=0.25, value=0.0)
 
-    st.header("Service (ops)")
+    st.header("Operations")
     cleaning_frequency = st.text_input("Cleaning frequency (e.g., 5x/week)", value="5x/week")
     trash_pickup = st.text_input("Trash pickup schedule", value="daily")
     day_porter_needed = st.selectbox("Day porter needed", ["No", "Yes"])
     restocking_needed = st.selectbox("Restocking needed", ["No", "Yes"])
 
     st.header("Consumable Supplies")
-    hand_soap = st.selectbox(
-        "Hand soap",
-    ["Provided by Contractor", "Provided by Client"])
-    
-    paper_towels = st.selectbox(
-    "Paper towels",
-    ["Provided by Contractor", "Provided by Client"])
+    hand_soap = st.selectbox("Hand soap", ["Provided by Contractor", "Provided by Client"])
+    paper_towels = st.selectbox("Paper towels", ["Provided by Contractor", "Provided by Client"])
+    toilet_paper = st.selectbox("Toilet paper", ["Provided by Contractor", "Provided by Client"])
 
-    toilet_paper = st.selectbox(
-    "Toilet paper",
-    ["Provided by Contractor", "Provided by Client"])
-
-
-# Main columns
 c1, c2, c3 = st.columns(3)
 
 with c1:
@@ -688,11 +561,9 @@ with c3:
 
     if pricing_mode == "Monthly Fixed":
         monthly_fixed_price = st.number_input("Monthly fixed price ($)", min_value=0.0, step=50.0, value=0.0)
-
     elif pricing_mode == "Per Sq Ft":
         rate_per_sqft = st.number_input("Rate per sq ft ($/sqft)", min_value=0.0, step=0.001, format="%.4f", value=0.0000)
         st.caption("Calculates monthly base: rate × square footage.")
-
     else:
         rate_per_visit = st.number_input("Rate per visit ($/visit)", min_value=0.0, step=25.0, value=0.0)
         visits_per_week = st.number_input("Visits per week", min_value=0.0, step=0.5, value=5.0)
@@ -727,15 +598,14 @@ with c3:
     st.subheader("Notes")
     notes = st.text_area("Notes (optional)", height=120)
 
-
 st.divider()
 
-# Multi-address section
+# Service addresses (multi)
 st.subheader("Service Address(es)")
-st.caption("Add one or more addresses for this proposal.")
+st.caption("Add one or more addresses for this agreement.")
 
 if "service_addresses" not in st.session_state:
-    st.session_state.service_addresses = [""]  # start with one line
+    st.session_state.service_addresses = [""]
 
 for i, addr in enumerate(st.session_state.service_addresses):
     ca, cb = st.columns([6, 1])
@@ -757,7 +627,7 @@ if st.button("Add another address"):
 
 st.divider()
 
-# Additional services line items
+# Add-ons (line items)
 st.subheader("Additional services (add-ons)")
 st.caption("Add line items (example: Day porter hours, Event cleanup, Carpet extraction add-on).")
 
@@ -767,9 +637,20 @@ if "addons" not in st.session_state:
 for i, item in enumerate(st.session_state.addons):
     ca, cb, cc = st.columns([3, 1, 1])
     with ca:
-        st.session_state.addons[i]["name"] = st.text_input(f"addon_name_{i}", value=item["name"], placeholder="Service name", label_visibility="collapsed")
+        st.session_state.addons[i]["name"] = st.text_input(
+            f"addon_name_{i}",
+            value=item["name"],
+            placeholder="Service name",
+            label_visibility="collapsed"
+        )
     with cb:
-        st.session_state.addons[i]["price"] = st.number_input(f"addon_price_{i}", min_value=0.0, step=25.0, value=float(item["price"]), label_visibility="collapsed")
+        st.session_state.addons[i]["price"] = st.number_input(
+            f"addon_price_{i}",
+            min_value=0.0,
+            step=25.0,
+            value=float(item["price"]),
+            label_visibility="collapsed"
+        )
     with cc:
         if st.button("Remove", key=f"remove_addon_{i}") and len(st.session_state.addons) > 1:
             st.session_state.addons.pop(i)
@@ -783,33 +664,33 @@ with cbtn1:
 with cbtn2:
     include_addons_in_total = st.selectbox("Include add-ons in monthly total?", ["Yes", "No"], index=0)
 
-
-# Compensation controls
 st.divider()
+
+# Compensation
 st.subheader("Compensation")
 compensation_mode = st.selectbox("Compensation mode", ["Auto (calculated)", "Override"])
 compensation_override = 0.0
 if compensation_mode == "Override":
     compensation_override = st.number_input("Compensation override ($ per month)", min_value=0.0, step=50.0, value=0.0)
-    st.caption("This is what will be shown as Compensation in the proposal, regardless of totals.")
+    st.caption("This is what will be shown as Compensation in the agreement, regardless of totals.")
 
 
-# Build proposal inputs
+# Build ProposalInputs
 p = ProposalInputs(
     client=client.strip(),
     facility_name=facility_name.strip(),
-    space_type=space_type.strip(),
-    square_footage=int(square_footage),
-    hand_soap=hand_soap,
-    paper_towels=paper_towels,
-    toilet_paper=toilet_paper,
-    floor_types=floor_types.strip(),
-
     service_begin_date=service_begin_date.strip(),
     service_end_date=service_end_date.strip(),
     service_addresses=st.session_state.service_addresses,
     days_per_week=int(days_per_week),
     cleaning_times=cleaning_times.strip(),
+    net_terms=int(net_terms),
+
+    sales_tax_percent=float(sales_tax_percent),
+
+    space_type=space_type.strip(),
+    square_footage=int(square_footage),
+    floor_types=floor_types.strip(),
 
     num_offices=int(num_offices),
     num_conference_rooms=int(num_conference_rooms),
@@ -822,6 +703,10 @@ p = ProposalInputs(
     day_porter_needed=day_porter_needed,
     trash_pickup=trash_pickup.strip(),
     restocking_needed=restocking_needed,
+
+    hand_soap=hand_soap,
+    paper_towels=paper_towels,
+    toilet_paper=toilet_paper,
 
     pricing_mode=pricing_mode,
     monthly_fixed_price=float(monthly_fixed_price),
@@ -836,9 +721,6 @@ p = ProposalInputs(
 
     additional_services=st.session_state.addons,
     include_addons_in_total=include_addons_in_total,
-
-    sales_tax_percent=float(sales_tax_percent),
-    net_terms=int(net_terms),
 
     compensation_mode=compensation_mode,
     compensation_override=float(compensation_override),
@@ -859,70 +741,76 @@ t4.metric("Compensation (monthly)", money(totals["compensation_monthly"]))
 if p.deep_clean_option == "One-time":
     st.info(f"One-time deep clean (separate): {money(totals['deep_clean_one_time'])}")
 elif p.deep_clean_option == "Quarterly":
-    st.info(f"Quarterly deep clean: {money(totals['deep_clean_quarterly'])} per quarter (monthly equivalent {money(totals['deep_clean_monthly_equiv'])})")
+    st.info(
+        f"Quarterly deep clean: {money(totals['deep_clean_quarterly'])} per quarter "
+        f"(monthly equivalent {money(totals['deep_clean_monthly_equiv'])})"
+    )
+
+# =========================
+# Schedule tuning section
+# =========================
 
 st.divider()
 st.subheader("Scope of Work — Schedule Tuning")
-st.caption("Adjust tasks and frequency for this job. This will control the Word table.")
+st.caption("Adjust tasks and frequency for this job. This controls the schedule table in the Word agreement.")
 
-# Build default schedule from inputs
 default_rows = compute_cleaning_schedule(p)
 default_df = schedule_rows_to_df(default_rows)
 
-# Initialize editable schedule in session state (first run only)
 if "schedule_df" not in st.session_state:
     st.session_state.schedule_df = default_df.copy()
 
-# If key inputs change significantly, offer reset
-with st.expander("Reset schedule (if inputs changed)", expanded=False):
-    if st.button("Reset schedule to recommended defaults"):
-        st.session_state.schedule_df = default_df.copy()
-        st.rerun()
+if st.button("Reset schedule to recommended defaults"):
+    st.session_state.schedule_df = default_df.copy()
+    st.rerun()
 
 edited_df = st.data_editor(
     st.session_state.schedule_df,
     num_rows="dynamic",
     use_container_width=True,
     column_config={
-        "Task": st.column_config.TextColumn("Task", width="large"),
+        "Task": st.column_config.TextColumn("Task"),
         "Daily": st.column_config.CheckboxColumn("Daily"),
         "Weekly": st.column_config.CheckboxColumn("Weekly"),
         "Monthly": st.column_config.CheckboxColumn("Monthly"),
     },
 )
 
-# Save edits back to session state
 st.session_state.schedule_df = edited_df
-
-# Convert edited DF to rows with checkmarks
 tuned_schedule_rows = df_to_schedule_rows(edited_df)
 
+# =========================
 # Preview + downloads
+# =========================
+
 st.divider()
 st.subheader("Preview")
-proposal_text = build_proposal_text(p)
-st.text_area("Generated proposal text", proposal_text, height=520)
+agreement_text = build_agreement_text(p)
+st.text_area("Agreement text (preview)", agreement_text, height=520)
 
 colA, colB, colC = st.columns(3)
+
 with colA:
     st.download_button(
         "Download .txt",
-        data=proposal_text.encode("utf-8"),
-        file_name=f"TorusGroup_Proposal_{datetime.date.today().isoformat()}.txt",
+        data=agreement_text.encode("utf-8"),
+        file_name=f"TorusGroup_Cleaning_Service_Agreement_{datetime.date.today().isoformat()}.txt",
         mime="text/plain",
     )
+
 with colB:
-    docx_data = docx_bytes_from_text(proposal_text, p, tuned_schedule_rows)
+    docx_data = docx_from_agreement(agreement_text, tuned_schedule_rows)
     st.download_button(
         "Download .docx (Word)",
         data=docx_data,
-        file_name=f"TorusGroup_Proposal_{datetime.date.today().isoformat()}.docx",
+        file_name=f"TorusGroup_Cleaning_Service_Agreement_{datetime.date.today().isoformat()}.docx",
         mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     )
+
 with colC:
     st.download_button(
         "Download inputs (.json)",
         data=str(asdict(p)).encode("utf-8"),
-        file_name=f"TorusGroup_Inputs_{datetime.date.today().isoformat()}.json",
+        file_name=f"TorusGroup_Agreement_Inputs_{datetime.date.today().isoformat()}.json",
         mime="application/json",
     )
