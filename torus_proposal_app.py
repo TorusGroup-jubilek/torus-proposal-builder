@@ -533,7 +533,7 @@ p = ProposalInputs(
     square_footage=int(square_footage),
     hand_soap=hand_soap,
     paper_towels=paper_towels,
-    toilet_paper=toilet_paper
+    toilet_paper=toilet_paper,
     floor_types=floor_types.strip(),
 
     service_begin_date=service_begin_date.strip(),
