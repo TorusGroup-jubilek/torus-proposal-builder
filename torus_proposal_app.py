@@ -221,18 +221,100 @@ def build_proposal_text(p: ProposalInputs) -> str:
     f"• Paper towels: {p.paper_towels}\n"
     f"• Toilet paper: {p.toilet_paper}"
 )
+
+    # --- General Requirements (uses consumable supply inputs) ---
+general_requirements_block = (
+    "GENERAL REQUIREMENTS\n"
+    "Contractor shall provide all labor, supervision, and personnel necessary "
+    "to perform the janitorial services described in this agreement.\n\n"
+    "Unless otherwise stated below, all cleaning equipment and standard janitorial "
+    "supplies required to perform the services shall be provided by the Contractor.\n\n"
+    "Consumable supplies:\n"
+    f"• Hand soap: {p.hand_soap}\n"
+    f"• Paper towels: {p.paper_towels}\n"
+    f"• Toilet paper: {p.toilet_paper}\n"
+)
+
+# --- Insurance & Liability ---
+insurance_block = (
+    "INSURANCE & LIABILITY\n"
+    "Contractor shall maintain insurance customary for janitorial service providers, "
+    "including general liability and workers’ compensation as required by law.\n\n"
+    "Upon request, Contractor may provide a certificate of insurance.\n\n"
+    "Each party shall be responsible for its own acts and omissions and those of its employees and subcontractors.\n"
+)
+
+# --- Access, Security, Keys/Badges ---
+access_security_block = (
+    "ACCESS & SECURITY\n"
+    "Client shall provide Contractor with reasonable access to the facility/facilities during the agreed cleaning times, "
+    "including access to water and electrical service as needed.\n\n"
+    "If keys, fobs, alarm codes, or badges are issued, Contractor will take reasonable care to safeguard them "
+    "and will return them upon termination of this agreement.\n\n"
+    "Client shall notify Contractor of any site-specific security procedures, restricted areas, or check-in/check-out requirements.\n"
+)
+
+# --- Damages, Client Property, Exclusions ---
+damages_exclusions_block = (
+    "DAMAGES, CLIENT PROPERTY & EXCLUSIONS\n"
+    "Contractor shall exercise reasonable care while performing services. Client agrees to secure or remove fragile, "
+    "high-value, or sensitive items. Contractor is not responsible for normal wear and tear.\n\n"
+    "Contractor is not responsible for pre-existing conditions (including but not limited to stained carpet, damaged flooring, "
+    "peeling finishes, or cracked tile) or damage resulting from defective surfaces/materials.\n\n"
+    "Services do not include hazardous materials handling, mold remediation, biohazard cleanup, or specialized restoration work "
+    "unless specifically listed in writing as an additional service.\n"
+)
+
+# --- Termination, Changes, and Suspension of Service ---
+termination_block = (
+    "TERM, TERMINATION & CHANGES\n"
+    "This agreement remains in effect for the contract period stated above unless terminated earlier in accordance with this section.\n\n"
+    "Either party may terminate this agreement with written notice. Unless otherwise agreed in writing, a notice period of 30 days applies.\n\n"
+    "Client may request changes to scope, frequency, or locations. Any material change may require a written adjustment to pricing.\n\n"
+    "Contractor may suspend services for non-payment after providing written notice and a reasonable opportunity to cure.\n"
+)
+
+# --- Payment Terms, Taxes, Late Fees ---
+# Uses p.net_terms and p.sales_tax_percent
+payment_block = (
+    "PAYMENT TERMS, TAXES & LATE FEES\n"
+    f"Client shall pay Contractor according to the agreed compensation and pricing. Payment terms are Net {p.net_terms}.\n\n"
+    f"Sales tax will be applied where required at {p.sales_tax_percent:.2f}%.\n\n"
+    "Past due balances may be subject to a late charge of 1.5% per month (or the maximum allowed by law, whichever is less), "
+    "plus reasonable collection costs.\n"
+)
+
+# --- Entire Agreement / Order of Precedence ---
+entire_agreement_block = (
+    "ENTIRE AGREEMENT\n"
+    "This document constitutes the entire agreement between the parties regarding the services described and supersedes all prior "
+    "discussions or representations. Any amendments must be in writing and signed by both parties.\n"
+)
     
     return f"""\n\n{title}\n
-return f"""
-CLEANING SERVICE AGREEMENT
+return f"""\n\nCLEANING SERVICE AGREEMENT\n
+{para1}\n
+{para2}\n
+{para3}\n
 
-{para1}
-{para2}
-{para3}
 {general_requirements_block}
 
+{insurance_block}
+
+{access_security_block}
+
+{damages_exclusions_block}
+
+{termination_block}
+
+{payment_block}
+
+{entire_agreement_block}
+
 ACCEPTANCE
-Authorized Signature: ___________________________    Date: _______________
+Client Authorized Signature: ___________________________    Date: _______________
+
+Contractor Authorized Signature: _______________________    Date: _______________
 """
     today = datetime.date.today().strftime("%B %d, %Y")
     totals = build_totals(p)
