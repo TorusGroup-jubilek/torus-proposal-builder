@@ -240,7 +240,60 @@ Authorized Signature: ___________________________    Date: _______________
 
 
 def docx_bytes_from_text(text: str) -> bytes:
+    from docx.shared import Inches
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.oxml import OxmlElement, ns
+
+
+def add_horizontal_line(paragraph):
+    p = paragraph._p
+    pPr = p.get_or_add_pPr()
+    pBdr = OxmlElement('w:pBdr')
+    bottom = OxmlElement('w:bottom')
+    bottom.set(ns.qn('w:val'), 'single')
+    bottom.set(ns.qn('w:sz'), '6')
+    bottom.set(ns.qn('w:space'), '1')
+    bottom.set(ns.qn('w:color'), 'auto')
+    pBdr.append(bottom)
+    pPr.append(pBdr)
+
+
+def docx_bytes_from_text(text: str) -> bytes:
     doc = Document()
+
+    # ---- HEADER TABLE (LOGO LEFT, INFO RIGHT) ----
+    table = doc.add_table(rows=1, cols=2)
+    table.autofit = True
+
+    # Logo cell
+    logo_cell = table.rows[0].cells[0]
+    try:
+        logo_paragraph = logo_cell.paragraphs[0]
+        logo_paragraph.alignment = WD_ALIGN_PARAGRAPH.LEFT
+        run = logo_paragraph.add_run()
+        run.add_picture("logo.png", width=Inches(1.5))
+    except Exception:
+        logo_cell.text = ""
+
+    # Company info cell
+    info_cell = table.rows[0].cells[1]
+    info_paragraph = info_cell.paragraphs[0]
+    info_paragraph.alignment = WD_ALIGN_PARAGRAPH.LEFT
+
+    info_run = info_paragraph.add_run(
+        "Torus Cleaning Services\n"
+        "Phone: 757-775-8053\n"
+        "Email: jubilek@torusgroupservices.com\n"
+        "www.torusgroupservices.com"
+    )
+    info_run.bold = True
+
+    # Spacer + horizontal line
+    spacer = doc.add_paragraph("")
+    line_paragraph = doc.add_paragraph("")
+    add_horizontal_line(line_paragraph)
+
+    # ---- DOCUMENT BODY ----
     for line in text.splitlines():
         if line.strip() and line == line.upper() and len(line) <= 80:
             para = doc.add_paragraph()
@@ -248,6 +301,7 @@ def docx_bytes_from_text(text: str) -> bytes:
             run.bold = True
         else:
             doc.add_paragraph(line)
+
     bio = BytesIO()
     doc.save(bio)
     return bio.getvalue()
