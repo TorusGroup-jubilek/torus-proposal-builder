@@ -3,7 +3,7 @@ import os
 from dataclasses import dataclass, asdict
 from io import BytesIO
 from typing import List, Dict, Optional
-
+import pandas as pd
 import streamlit as st
 from docx import Document
 
@@ -558,7 +558,7 @@ def compute_cleaning_schedule(p) -> list:
     return rows
 
 
-def add_scope_of_work_table(doc, p):
+def add_scope_of_work_table(doc, p, schedule_rows: Optional[list] = None):
     title_p = doc.add_paragraph()
     title_run = title_p.add_run("SCOPE OF WORK – CLEANING SCHEDULE")
     title_run.bold = True
@@ -573,19 +573,21 @@ def add_scope_of_work_table(doc, p):
     hdr[2].text = "Weekly"
     hdr[3].text = "Monthly"
 
-    for task, daily, weekly, monthly in compute_cleaning_schedule(p):
+    rows = schedule_rows if schedule_rows else compute_cleaning_schedule(p)
+
+    for task, daily, weekly, monthly in rows:
         row = table.add_row().cells
         row[0].text = task
         row[1].text = daily
         row[2].text = weekly
         row[3].text = monthly
 
-    doc.add_paragraph("")  # spacer
+    doc.add_paragraph("")
 
 import os
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 
-def docx_bytes_from_text(text: str, p) -> bytes:
+def docx_bytes_from_text(text: str, p, schedule_rows) -> bytes:
     template_path = "proposal_template.docx"
     doc = Document(template_path) if os.path.exists(template_path) else Document()
 
@@ -605,7 +607,7 @@ def docx_bytes_from_text(text: str, p) -> bytes:
 
         # Inject the dynamic table where the placeholder appears
         if s == "SCOPE_OF_WORK_TABLE":
-            add_scope_of_work_table(doc, p)
+            add_scope_of_work_table(doc, p, schedule_rows=schedule_rows)
             continue
 
         doc.add_paragraph(s)
@@ -859,6 +861,42 @@ if p.deep_clean_option == "One-time":
 elif p.deep_clean_option == "Quarterly":
     st.info(f"Quarterly deep clean: {money(totals['deep_clean_quarterly'])} per quarter (monthly equivalent {money(totals['deep_clean_monthly_equiv'])})")
 
+st.divider()
+st.subheader("Scope of Work — Schedule Tuning")
+st.caption("Adjust tasks and frequency for this job. This will control the Word table.")
+
+# Build default schedule from inputs
+default_rows = compute_cleaning_schedule(p)
+default_df = schedule_rows_to_df(default_rows)
+
+# Initialize editable schedule in session state (first run only)
+if "schedule_df" not in st.session_state:
+    st.session_state.schedule_df = default_df.copy()
+
+# If key inputs change significantly, offer reset
+with st.expander("Reset schedule (if inputs changed)", expanded=False):
+    if st.button("Reset schedule to recommended defaults"):
+        st.session_state.schedule_df = default_df.copy()
+        st.rerun()
+
+edited_df = st.data_editor(
+    st.session_state.schedule_df,
+    num_rows="dynamic",
+    use_container_width=True,
+    column_config={
+        "Task": st.column_config.TextColumn("Task", width="large"),
+        "Daily": st.column_config.CheckboxColumn("Daily"),
+        "Weekly": st.column_config.CheckboxColumn("Weekly"),
+        "Monthly": st.column_config.CheckboxColumn("Monthly"),
+    },
+)
+
+# Save edits back to session state
+st.session_state.schedule_df = edited_df
+
+# Convert edited DF to rows with checkmarks
+tuned_schedule_rows = df_to_schedule_rows(edited_df)
+
 # Preview + downloads
 st.divider()
 st.subheader("Preview")
@@ -874,7 +912,7 @@ with colA:
         mime="text/plain",
     )
 with colB:
-    docx_data = docx_bytes_from_text(proposal_text, p)
+    docx_data = docx_bytes_from_text(proposal_text, p, tuned_schedule_rows)
     st.download_button(
         "Download .docx (Word)",
         data=docx_data,
