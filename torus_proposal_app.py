@@ -509,6 +509,9 @@ p = ProposalInputs(
     facility_name=facility_name.strip(),
     space_type=space_type.strip(),
     square_footage=int(square_footage),
+    hand_soap=hand_soap,
+    paper_towels=paper_towels,
+    toilet_paper=toilet_paper
     floor_types=floor_types.strip(),
 
     service_begin_date=service_begin_date.strip(),
@@ -528,7 +531,6 @@ p = ProposalInputs(
     day_porter_needed=day_porter_needed,
     trash_pickup=trash_pickup.strip(),
     restocking_needed=restocking_needed,
-    supplies_included=supplies_included,
 
     pricing_mode=pricing_mode,
     monthly_fixed_price=float(monthly_fixed_price),
