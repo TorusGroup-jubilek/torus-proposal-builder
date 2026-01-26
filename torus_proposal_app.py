@@ -2,14 +2,13 @@ import datetime
 import os
 from dataclasses import dataclass, asdict
 from io import BytesIO
-from typing import List, Dict, Optional
+from typing import List, Dict
 
 import streamlit as st
 import pandas as pd
 from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.enum.table import WD_TABLE_ALIGNMENT
-
 
 COMPANY_NAME = "Torus Group"
 CHECK = "✓"
@@ -18,7 +17,6 @@ CHECK = "✓"
 # =========================
 # Data Model
 # =========================
-
 @dataclass
 class ProposalInputs:
     # Agreement / client
@@ -79,6 +77,9 @@ class ProposalInputs:
     compensation_mode: str  # Auto (calculated) | Override
     compensation_override: float
 
+    # Optional section
+    cleaning_plan: str
+
     # Notes
     notes: str
 
@@ -86,13 +87,11 @@ class ProposalInputs:
 # =========================
 # Helpers
 # =========================
-
 def money(x: float) -> str:
     return f"${x:,.2f}"
 
 
 def compute_visits_per_month(visits_per_week: float) -> int:
-    # 52 weeks / 12 months ≈ 4.3333 weeks/month
     return int(round(float(visits_per_week) * (52.0 / 12.0)))
 
 
@@ -111,23 +110,19 @@ def _has_keyword(text: str, keywords) -> bool:
 
 
 def build_totals(p: ProposalInputs) -> dict:
-    # Base monthly
     if p.pricing_mode == "Monthly Fixed":
         base_monthly = float(p.monthly_fixed_price)
         base_explain = f"Monthly fixed price: {money(base_monthly)}"
-
     elif p.pricing_mode == "Per Sq Ft":
         base_monthly = float(p.rate_per_sqft) * float(p.square_footage)
         base_explain = f"Rate: {money(p.rate_per_sqft)}/sqft × {p.square_footage:,} sqft = {money(base_monthly)} per month"
-
-    else:  # Per Visit
+    else:
         base_monthly = float(p.rate_per_visit) * float(p.visits_per_month)
         base_explain = (
             f"Rate: {money(p.rate_per_visit)}/visit × {p.visits_per_month} visits/month "
             f"({p.visits_per_week:g}/week) = {money(base_monthly)} per month"
         )
 
-    # Add-ons
     addons_total = 0.0
     addons_lines = []
     for item in p.additional_services:
@@ -140,26 +135,21 @@ def build_totals(p: ProposalInputs) -> dict:
     include_addons = (p.include_addons_in_total == "Yes")
     addons_included_monthly = addons_total if include_addons else 0.0
 
-    # Deep clean
     deep_clean_one_time = 0.0
     deep_clean_quarterly = 0.0
     deep_clean_monthly_equiv = 0.0
-
     if p.deep_clean_option == "One-time":
         deep_clean_one_time = float(p.deep_clean_price)
     elif p.deep_clean_option == "Quarterly":
         deep_clean_quarterly = float(p.deep_clean_price)
         deep_clean_monthly_equiv = deep_clean_quarterly / 3.0
 
-    # Subtotal (monthly)
     monthly_subtotal = base_monthly + addons_included_monthly + deep_clean_monthly_equiv
 
-    # Tax
     tax_rate = max(0.0, float(p.sales_tax_percent)) / 100.0
     monthly_tax = monthly_subtotal * tax_rate
     monthly_total_with_tax = monthly_subtotal + monthly_tax
 
-    # Compensation
     if p.compensation_mode == "Override":
         compensation_monthly = float(p.compensation_override)
         compensation_explain = f"Compensation (override): {money(compensation_monthly)}"
@@ -186,17 +176,11 @@ def build_totals(p: ProposalInputs) -> dict:
 
 
 # =========================
-# Dynamic schedule (recommended) + tuning
+# Dynamic schedule + tuning
 # =========================
-
 def compute_cleaning_schedule(p: ProposalInputs) -> list:
-    """
-    Returns rows: (task, daily_check, weekly_check, monthly_check)
-    Uses p.days_per_week, room counts, floor types, and options.
-    """
     d = int(p.days_per_week or 0)
 
-    # Floors keyword detection
     has_carpet = _has_keyword(p.floor_types, ["carpet"])
     has_vct = _has_keyword(p.floor_types, ["vct", "vinyl"])
     has_epoxy = _has_keyword(p.floor_types, ["epoxy"])
@@ -204,52 +188,40 @@ def compute_cleaning_schedule(p: ProposalInputs) -> list:
     hard_floors = has_vct or has_epoxy or has_tile or _has_keyword(p.floor_types, ["hard", "concrete"])
 
     rows = []
-
-    # Core
     rows.append(("Empty trash & replace liners", CHECK if d >= 3 else "", CHECK if d in (1, 2) else "", ""))
     rows.append(("Clean/disinfect high-touch points (handles, switches, rails)", CHECK if d >= 3 else "", CHECK if d in (1, 2) else "", ""))
 
-    # Restrooms
     if int(p.num_bathrooms or 0) > 0:
         rows.append(("Clean & disinfect restrooms; restock as applicable", CHECK if d >= 3 else "", CHECK if d in (1, 2) else "", ""))
 
-    # Break rooms / kitchens
     if int(p.num_break_rooms or 0) > 0 or int(p.num_kitchens or 0) > 0:
         rows.append(("Break rooms/kitchens: counters, sinks, exterior appliances", CHECK if d >= 5 else "", CHECK if d in (1, 2, 3, 4) else "", ""))
 
-    # Dusting & glass
     rows.append(("Dust horizontal surfaces (accessible)", CHECK if d >= 5 else "", CHECK if d in (1, 2, 3, 4) else "", ""))
     rows.append(("Spot clean glass & mirrors (interior)", CHECK if d >= 5 else "", CHECK if d in (1, 2, 3, 4) else "", ""))
 
-    # Carpet
     if has_carpet:
         rows.append(("Vacuum carpeted areas (as applicable)", CHECK if d >= 3 else "", CHECK if d in (1, 2) else "", ""))
         rows.append(("Spot treat carpet stains (as needed)", CHECK if d >= 5 else "", CHECK if d in (1, 2, 3, 4) else "", ""))
         rows.append(("Carpet extraction / shampoo (as scheduled)", "", "", CHECK))
 
-    # Hard floors
     if hard_floors:
         rows.append(("Damp mop hard floors (as applicable)", CHECK if d >= 5 else "", CHECK if d in (1, 2, 3, 4) else "", ""))
         rows.append(("Detail floor scrubbing / machine scrub", "", CHECK if d >= 3 else "", CHECK))
 
-    # Monthly details
     rows.append(("High dusting (vents, ledges, corners)", "", "", CHECK))
     rows.append(("Baseboards / detail edges (as applicable)", "", "", CHECK))
 
-    # VCT extras
     if has_vct:
         rows.append(("VCT maintenance (buff/burnish if applicable)", "", "", CHECK))
         rows.append(("Strip & wax (as quoted/needed)", "", "", CHECK))
 
-    # Locker rooms
     if int(p.num_locker_rooms or 0) > 0:
         rows.append(("Locker rooms: clean/disinfect & mop", CHECK if d >= 3 else "", CHECK if d in (1, 2) else "", ""))
 
-    # Day porter
     if p.day_porter_needed == "Yes":
         rows.append(("Day porter tasks (restroom checks, spills, touch-ups)", CHECK, "", ""))
 
-    # Deep clean note
     if p.deep_clean_option != "None":
         rows.append(("Deep clean tasks (per agreement)", "", "", CHECK))
 
@@ -257,7 +229,6 @@ def compute_cleaning_schedule(p: ProposalInputs) -> list:
 
 
 def schedule_rows_to_df(rows: list) -> pd.DataFrame:
-    # Convert checkmarks to booleans for editing
     return pd.DataFrame(
         [(t, d == CHECK, w == CHECK, m == CHECK) for (t, d, w, m) in rows],
         columns=["Task", "Daily", "Weekly", "Monthly"]
@@ -302,19 +273,25 @@ def add_scope_of_work_table(doc: Document, schedule_rows: list):
     doc.add_paragraph("")
 
 
-# =========================
-# Agreement text (with placeholder)
-# =========================
+def add_address_bullets(doc: Document, addresses: List[str]):
+    addresses = clean_list(addresses)
+    if not addresses:
+        doc.add_paragraph("(not provided)")
+        return
+    for a in addresses:
+        doc.add_paragraph(a, style="List Bullet")
 
+
+# =========================
+# Agreement text
+# =========================
 def build_agreement_text(p: ProposalInputs) -> str:
     totals = build_totals(p)
     addresses = clean_list(p.service_addresses)
     address_inline = "; ".join(addresses) if addresses else "(service address not provided)"
-
     today = datetime.date.today().strftime("%B %d, %Y")
     floor_note = p.floor_types.strip() if p.floor_types.strip() else "N/A"
 
-    # Title + required 3 paragraphs (your exact language; date left blank)
     para1 = (
         f"{p.client}, ('Client'), enters into this agreement on this date "
         f"______________ for Torus Cleaning Services ('Contractor'), to provide "
@@ -324,11 +301,15 @@ def build_agreement_text(p: ProposalInputs) -> str:
         f"Contractor shall provide janitorial services {p.days_per_week} per week between the hours of "
         f"{p.cleaning_times} for the facility/facilities located at {address_inline}."
     )
-    para3 = (
-        f"The contract period is as follows {p.service_begin_date} to {p.service_end_date}."
-    )
+    para3 = f"The contract period is as follows {p.service_begin_date} to {p.service_end_date}."
 
-    # General Requirements (uses consumable inputs + supervision/personnel)
+    cleaning_plan_block = ""
+    if p.cleaning_plan.strip():
+        cleaning_plan_block = (
+            "CLEANING PLAN\n"
+            f"{p.cleaning_plan.strip()}\n"
+        )
+
     general_requirements_block = (
         "GENERAL REQUIREMENTS\n"
         "Contractor shall provide all labor, supervision, and personnel necessary to perform the janitorial services "
@@ -389,7 +370,6 @@ def build_agreement_text(p: ProposalInputs) -> str:
         "discussions or representations. Any amendments must be in writing and signed by both parties.\n"
     )
 
-    # Pricing/compensation summary (kept in the agreement so it’s crystal clear)
     pricing_block = (
         "PRICING & COMPENSATION\n"
         f"Base service pricing: {totals['base_explain']}\n"
@@ -414,7 +394,6 @@ def build_agreement_text(p: ProposalInputs) -> str:
     if totals["addons_lines"]:
         add_on_block = "ADDITIONAL SERVICES (LINE ITEMS)\n" + "\n".join(totals["addons_lines"]) + "\n"
 
-    # Agreement text (note leading blank lines to sit under your template header)
     return f"""
 \n\nCLEANING SERVICE AGREEMENT
 
@@ -433,7 +412,7 @@ SERVICE_ADDRESSES_BULLETS
 
 SCOPE_OF_WORK_TABLE
 
-{general_requirements_block}
+{cleaning_plan_block}{general_requirements_block}
 
 {pricing_block}
 {deep_clean_block}
@@ -470,17 +449,8 @@ Contractor Authorized Signature: ___________________________   Date: ___________
 # =========================
 # Word export (uses template if present)
 # =========================
-
-def add_address_bullets(doc: Document, addresses: List[str]):
-    addresses = clean_list(addresses)
-    if not addresses:
-        doc.add_paragraph("(not provided)")
-        return
-    for a in addresses:
-        doc.add_paragraph(a, style="List Bullet")
-
-def docx_from_agreement(text: str, schedule_rows: list) -> bytes:
-    template_path = "Torus_Template.docx"
+def docx_from_agreement(text: str, schedule_rows: list, addresses: List[str]) -> bytes:
+    template_path = "proposal_template.docx"
     doc = Document(template_path) if os.path.exists(template_path) else Document()
 
     for line in text.splitlines():
@@ -497,12 +467,19 @@ def docx_from_agreement(text: str, schedule_rows: list) -> bytes:
             run.bold = True
             continue
 
+        if s == "SERVICE_ADDRESSES_BULLETS":
+            add_address_bullets(doc, addresses)
+            continue
+
         if s == "SCOPE_OF_WORK_TABLE":
             add_scope_of_work_table(doc, schedule_rows)
             continue
 
-        if s == "SERVICE_ADDRESSES_BULLETS":
-            add_address_bullets(doc, st.session_state.service_addresses)
+        # Bold section headings (all caps)
+        if s.isupper() and len(s) <= 60:
+            para = doc.add_paragraph()
+            run = para.add_run(s)
+            run.bold = True
             continue
 
         doc.add_paragraph(s)
@@ -515,7 +492,6 @@ def docx_from_agreement(text: str, schedule_rows: list) -> bytes:
 # =========================
 # UI
 # =========================
-
 st.set_page_config(page_title=f"{COMPANY_NAME} Agreement Builder", layout="wide")
 st.title(f"{COMPANY_NAME} — Cleaning Service Agreement Builder")
 
@@ -608,6 +584,13 @@ with c3:
             if st.checkbox("Glass detailing"):
                 deep_clean_includes.append("Glass detailing (interior as applicable)")
 
+    st.subheader("Cleaning Plan (optional)")
+    cleaning_plan = st.text_area(
+        "Cleaning Plan",
+        height=140,
+        placeholder="Add any special instructions, priorities, staffing approach, or site-specific plan..."
+    )
+
     st.subheader("Notes")
     notes = st.text_area("Notes (optional)", height=120)
 
@@ -640,7 +623,7 @@ if st.button("Add another address"):
 
 st.divider()
 
-# Add-ons (line items)
+# Add-ons
 st.subheader("Additional services (add-ons)")
 st.caption("Add line items (example: Day porter hours, Event cleanup, Carpet extraction add-on).")
 
@@ -688,7 +671,7 @@ if compensation_mode == "Override":
     st.caption("This is what will be shown as Compensation in the agreement, regardless of totals.")
 
 
-# Build ProposalInputs
+# Build inputs
 p = ProposalInputs(
     client=client.strip(),
     facility_name=facility_name.strip(),
@@ -698,52 +681,42 @@ p = ProposalInputs(
     days_per_week=int(days_per_week),
     cleaning_times=cleaning_times.strip(),
     net_terms=int(net_terms),
-
     sales_tax_percent=float(sales_tax_percent),
-
     space_type=space_type.strip(),
     square_footage=int(square_footage),
     floor_types=floor_types.strip(),
-
     num_offices=int(num_offices),
     num_conference_rooms=int(num_conference_rooms),
     num_break_rooms=int(num_break_rooms),
     num_bathrooms=int(num_bathrooms),
     num_kitchens=int(num_kitchens),
     num_locker_rooms=int(num_locker_rooms),
-
     cleaning_frequency=cleaning_frequency.strip(),
     day_porter_needed=day_porter_needed,
     trash_pickup=trash_pickup.strip(),
     restocking_needed=restocking_needed,
-
     hand_soap=hand_soap,
     paper_towels=paper_towels,
     toilet_paper=toilet_paper,
-
     pricing_mode=pricing_mode,
     monthly_fixed_price=float(monthly_fixed_price),
     rate_per_sqft=float(rate_per_sqft),
     rate_per_visit=float(rate_per_visit),
     visits_per_week=float(visits_per_week),
     visits_per_month=int(visits_per_month),
-
     deep_clean_option=deep_clean_option,
     deep_clean_price=float(deep_clean_price),
     deep_clean_includes=deep_clean_includes,
-
     additional_services=st.session_state.addons,
     include_addons_in_total=include_addons_in_total,
-
     compensation_mode=compensation_mode,
     compensation_override=float(compensation_override),
-
+    cleaning_plan=cleaning_plan.strip(),
     notes=notes.strip(),
 )
 
 totals = build_totals(p)
 
-# Totals display
 st.subheader("Calculated totals")
 t1, t2, t3, t4 = st.columns(4)
 t1.metric("Monthly subtotal (pre-tax)", money(totals["monthly_subtotal"]))
@@ -751,18 +724,7 @@ t2.metric("Sales tax (monthly)", money(totals["monthly_tax"]))
 t3.metric("Monthly total (with tax)", money(totals["monthly_total_with_tax"]))
 t4.metric("Compensation (monthly)", money(totals["compensation_monthly"]))
 
-if p.deep_clean_option == "One-time":
-    st.info(f"One-time deep clean (separate): {money(totals['deep_clean_one_time'])}")
-elif p.deep_clean_option == "Quarterly":
-    st.info(
-        f"Quarterly deep clean: {money(totals['deep_clean_quarterly'])} per quarter "
-        f"(monthly equivalent {money(totals['deep_clean_monthly_equiv'])})"
-    )
-
-# =========================
-# Schedule tuning section
-# =========================
-
+# Schedule tuning
 st.divider()
 st.subheader("Scope of Work — Schedule Tuning")
 st.caption("Adjust tasks and frequency for this job. This controls the schedule table in the Word agreement.")
@@ -792,10 +754,7 @@ edited_df = st.data_editor(
 st.session_state.schedule_df = edited_df
 tuned_schedule_rows = df_to_schedule_rows(edited_df)
 
-# =========================
 # Preview + downloads
-# =========================
-
 st.divider()
 st.subheader("Preview")
 agreement_text = build_agreement_text(p)
@@ -812,7 +771,7 @@ with colA:
     )
 
 with colB:
-    docx_data = docx_from_agreement(agreement_text, tuned_schedule_rows)
+    docx_data = docx_from_agreement(agreement_text, tuned_schedule_rows, clean_list(st.session_state.service_addresses))
     st.download_button(
         "Download .docx (Word)",
         data=docx_data,
