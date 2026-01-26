@@ -209,11 +209,30 @@ def build_proposal_text(p: ProposalInputs) -> str:
     f"• Paper towels: {p.paper_towels}\n"
     f"• Toilet paper: {p.toilet_paper}"
 )
+
+    general_requirements_block = (
+    "GENERAL REQUIREMENTS\n"
+    "Contractor shall provide all labor, supervision, and personnel necessary "
+    "to perform the janitorial services described in this agreement.\n\n"
+    "Unless otherwise stated below, all cleaning equipment and standard janitorial "
+    "supplies required to perform the services shall be provided by the Contractor.\n\n"
+    "Consumable supplies:\n"
+    f"• Hand soap: {p.hand_soap}\n"
+    f"• Paper towels: {p.paper_towels}\n"
+    f"• Toilet paper: {p.toilet_paper}"
+)
     
     return f"""\n\n{title}\n
-{para1}\n
-{para2}\n
-{para3}\n
+return f"""
+CLEANING SERVICE AGREEMENT
+
+{para1}
+{para2}
+{para3}
+{general_requirements_block}
+
+ACCEPTANCE
+Authorized Signature: ___________________________    Date: _______________
 """
     today = datetime.date.today().strftime("%B %d, %Y")
     totals = build_totals(p)
