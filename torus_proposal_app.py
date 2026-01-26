@@ -183,9 +183,10 @@ def build_proposal_text(p: ProposalInputs) -> str:
     title = "CLEANING SERVICE AGREEMENT"
 
     para1 = (
-        f"{p.client}, ('Client'), enters into this agreement on this date {p.agreement_date} "
-        f"for Torus Cleaning Services ('Contractor'), to provide janitorial services for "
-        f"facility/facilities located at the following locations: {address_block_inline}"
+        f"{p.client}, ('Client'), enters into this agreement on this date "
+        f"______________ for Torus Cleaning Services ('Contractor'), to provide "
+        f"janitorial services for facility/facilities located at the following "
+        f"locations: {address_block_inline}"
     )
 
     para2 = (
