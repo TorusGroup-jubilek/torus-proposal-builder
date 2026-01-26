@@ -42,7 +42,9 @@ class ProposalInputs:
     day_porter_needed: str  # Yes/No
     trash_pickup: str
     restocking_needed: str  # Yes/No
-    supplies_included: str  # Yes/No
+    hand_soap: str
+    paper_towels: str
+    toilet_paper: str
 
     # Pricing
     pricing_mode: str  # Monthly Fixed | Per Sq Ft | Per Visit
@@ -200,6 +202,14 @@ def build_proposal_text(p: ProposalInputs) -> str:
 
     # Keep your notes/add-ons/pricing below if you want — for now this is the agreement intro section.
     # You can append more sections after this as needed.
+
+    supplies_block = (
+    f"Consumable supplies:\n"
+    f"• Hand soap: {p.hand_soap}\n"
+    f"• Paper towels: {p.paper_towels}\n"
+    f"• Toilet paper: {p.toilet_paper}"
+)
+    
     return f"""\n\n{title}\n
 {para1}\n
 {para2}\n
@@ -364,7 +374,19 @@ with st.sidebar:
     trash_pickup = st.text_input("Trash pickup schedule", value="daily")
     day_porter_needed = st.selectbox("Day porter needed", ["No", "Yes"])
     restocking_needed = st.selectbox("Restocking needed", ["No", "Yes"])
-    supplies_included = st.selectbox("Supplies included", ["No", "Yes"])
+
+    st.header("Consumable Supplies")
+    hand_soap = st.selectbox(
+        "Hand soap",
+    ["Provided by Contractor", "Provided by Client"])
+    
+    paper_towels = st.selectbox(
+    "Paper towels",
+    ["Provided by Contractor", "Provided by Client"])
+
+    toilet_paper = st.selectbox(
+    "Toilet paper",
+    ["Provided by Contractor", "Provided by Client"])
 
 
 # Main columns
