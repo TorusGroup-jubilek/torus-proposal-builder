@@ -299,6 +299,8 @@ return f"""\n\nCLEANING SERVICE AGREEMENT\n
 
 {general_requirements_block}
 
+{SCOPE_OF_WORK_TABLE}
+
 {insurance_block}
 
 {access_security_block}
@@ -415,8 +417,45 @@ Authorized Signature: ___________________________    Date: _______________
 
 
 import os
-from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.enum.table import WD_TABLE_ALIGNMENT
 
+def add_scope_of_work_table(doc):
+    doc.add_paragraph("SCOPE OF WORK – CLEANING SCHEDULE").runs[0].bold = True
+
+    table = doc.add_table(rows=1, cols=4)
+    table.alignment = WD_TABLE_ALIGNMENT.LEFT
+    table.style = "Table Grid"
+
+    hdr_cells = table.rows[0].cells
+    hdr_cells[0].text = "Task"
+    hdr_cells[1].text = "Daily"
+    hdr_cells[2].text = "Weekly"
+    hdr_cells[3].text = "Monthly"
+
+    tasks = [
+        ("Empty trash & replace liners", "✓", "", ""),
+        ("Clean & disinfect restrooms", "✓", "", ""),
+        ("Clean sinks, counters & fixtures", "✓", "", ""),
+        ("Vacuum carpeted areas", "✓", "", ""),
+        ("Spot clean glass & mirrors", "✓", "", ""),
+        ("Dust horizontal surfaces", "", "✓", ""),
+        ("Damp mop hard floors", "", "✓", ""),
+        ("Detail break room / kitchen cleaning", "", "✓", ""),
+        ("High dusting (vents, ledges, corners)", "", "", "✓"),
+        ("Detail floor scrubbing / machine scrub", "", "", "✓"),
+    ]
+
+    for task, daily, weekly, monthly in tasks:
+        row_cells = table.add_row().cells
+        row_cells[0].text = task
+        row_cells[1].text = daily
+        row_cells[2].text = weekly
+        row_cells[3].text = monthly
+
+    doc.add_paragraph("")  # spacing after table
+
+
+import os
 
 def docx_bytes_from_text(text: str) -> bytes:
     template_path = "proposal_template.docx"
@@ -424,15 +463,13 @@ def docx_bytes_from_text(text: str) -> bytes:
 
     lines = text.splitlines()
 
-    for idx, line in enumerate(lines):
+    for line in lines:
         line_stripped = line.strip()
 
-        # Skip empty lines but preserve spacing by adding blank paragraphs
         if not line_stripped:
             doc.add_paragraph("")
             continue
 
-        # Title formatting
         if line_stripped == "CLEANING SERVICE AGREEMENT":
             p = doc.add_paragraph()
             p.alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -440,13 +477,16 @@ def docx_bytes_from_text(text: str) -> bytes:
             run.bold = True
             continue
 
-        # Normal paragraph
+        # Insert Scope of Work table at the right place
+        if line_stripped == "SCOPE_OF_WORK_TABLE":
+            add_scope_of_work_table(doc)
+            continue
+
         doc.add_paragraph(line_stripped)
 
     bio = BytesIO()
     doc.save(bio)
     return bio.getvalue()
-
 
 # ---------------- UI ----------------
 
