@@ -676,7 +676,13 @@ Company profile/context:
             {"role": "system", "content": instructions},
             {"role": "user", "content": payload},
         ],
-        text={"format": {"type": "json_schema", "json_schema": schema}},
+        text={
+            "format": {
+                "type": "json_schema",
+                "name": "rfp_analysis",
+                "json_schema": schema
+            }
+        },
         store=False,
     )
 
