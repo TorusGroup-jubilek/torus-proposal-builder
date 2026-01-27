@@ -477,7 +477,7 @@ Contractor Authorized Signature: ___________________________   Date: ___________
 # Word export
 # =========================
 def docx_from_agreement(text: str, schedule_rows: list, addresses: List[str], p: ProposalInputs) -> bytes:
-    template_path = "proposal_template.docx"
+    template_path = "Torus_Template.docx"
     doc = Document(template_path) if os.path.exists(template_path) else Document()
 
     # Cover page injection (optional)
