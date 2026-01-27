@@ -169,21 +169,13 @@ def add_bullet_paragraph(doc: Document, text: str):
 
 
 def add_cover_page(doc: Document, client: str, body: str):
-    doc.add_paragraph(client)
     doc.add_paragraph("")
-    doc.add_paragraph("Attn: ______________________")
     doc.add_paragraph("")
-    doc.add_paragraph("Re: Janitorial Services Proposal")
     doc.add_paragraph("")
     doc.add_paragraph(f"Dear {client},")
     doc.add_paragraph("")
     doc.add_paragraph(body or "")
     doc.add_paragraph("")
-    doc.add_paragraph("Respectfully,")
-    doc.add_paragraph("")
-    doc.add_paragraph("Kary Jubilee")
-    doc.add_paragraph("President")
-    doc.add_paragraph("Torus Cleaning Services")
     doc.add_page_break()
 
 
