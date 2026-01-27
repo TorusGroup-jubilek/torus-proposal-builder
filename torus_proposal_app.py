@@ -679,8 +679,7 @@ Company profile/context:
         text={
             "format": {
                 "type": "json_schema",
-                "name": "rfp_analysis",
-                "schema": "schema",
+                "schema": schema["schema"],
             }
         },
         store=False,
