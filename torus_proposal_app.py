@@ -15,6 +15,7 @@ from dataclasses import dataclass, asdict
 from io import BytesIO
 from typing import List, Dict, Any
 
+
 import pandas as pd
 import streamlit as st
 from docx import Document
@@ -22,6 +23,8 @@ from docx.enum.table import WD_TABLE_ALIGNMENT
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from openai import OpenAI
 from pypdf import PdfReader
+from pydantic import BaseModel
+from typing import Optional
 
 COMPANY_NAME = "Torus Group"
 CHECK = "✓"
@@ -586,107 +589,60 @@ def get_openai_client() -> OpenAI:
 def analyze_rfp_with_ai(rfp_text: str, company_profile: str = "") -> Dict[str, Any]:
     client = get_openai_client()
 
-    # JSON schema for consistent output
-    schema = {
-        "name": "rfp_analysis",
-        "schema": {
-            "type": "object",
-            "additionalProperties": False,
-            "properties": {
-                "opportunity_summary": {
-                    "type": "object",
-                    "additionalProperties": False,
-                    "properties": {
-                        "title": {"type": "string"},
-                        "agency_or_client": {"type": "string"},
-                        "submission_deadline": {"type": "string"},
-                        "submission_method": {"type": "string"},
-                        "site_visit_required": {"type": "boolean"},
-                        "period_of_performance": {"type": "string"},
-                    },
-                    "required": [
-                        "title",
-                        "agency_or_client",
-                        "submission_deadline",
-                        "submission_method",
-                        "site_visit_required",
-                        "period_of_performance",
-                    ],
-                },
-                "compliance_checklist": {"type": "array", "items": {"type": "string"}},
-                "cleaning_plan_draft": {"type": "string"},
-                "scope_of_work_draft": {"type": "string"},
-                "schedule_rows": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "additionalProperties": False,
-                        "properties": {
-                            "task": {"type": "string"},
-                            "daily": {"type": "boolean"},
-                            "weekly": {"type": "boolean"},
-                            "monthly": {"type": "boolean"},
-                        },
-                        "required": ["task", "daily", "weekly", "monthly"],
-                    },
-                },
-                "add_on_suggestions": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "additionalProperties": False,
-                        "properties": {
-                            "name": {"type": "string"},
-                            "notes": {"type": "string"},
-                        },
-                        "required": ["name", "notes"],
-                    },
-                },
-                "clarifying_questions": {"type": "array", "items": {"type": "string"}},
-                "assumptions": {"type": "array", "items": {"type": "string"}},
-            },
-            "required": [
-                "opportunity_summary",
-                "compliance_checklist",
-                "cleaning_plan_draft",
-                "scope_of_work_draft",
-                "schedule_rows",
-                "add_on_suggestions",
-                "clarifying_questions",
-                "assumptions",
-            ],
-        },
-    }
+    def analyze_rfp_with_ai(rfp_text: str, company_profile: str = "") -> dict:
+    client = get_openai_client()
+
+    class OpportunitySummary(BaseModel):
+        title: str
+        agency_or_client: str
+        submission_deadline: str
+        submission_method: str
+        site_visit_required: bool
+        period_of_performance: str
+
+    class ScheduleRow(BaseModel):
+        task: str
+        daily: bool
+        weekly: bool
+        monthly: bool
+
+    class AddOnSuggestion(BaseModel):
+        name: str
+        notes: str
+
+    class RfpAnalysis(BaseModel):
+        opportunity_summary: OpportunitySummary
+        compliance_checklist: list[str]
+        cleaning_plan_draft: str
+        scope_of_work_draft: str
+        schedule_rows: list[ScheduleRow]
+        add_on_suggestions: list[AddOnSuggestion]
+        clarifying_questions: list[str]
+        assumptions: list[str]
 
     instructions = f"""
 You are assisting a janitorial contractor preparing an RFP/PWS response.
 Extract mandatory requirements, compliance items, and draft a cleaning plan and scope of work.
 Also propose a cleaning schedule table (daily/weekly/monthly) suitable for a janitorial SOW.
-Return ONLY JSON that matches the provided schema.
 
 Company profile/context:
 {company_profile}
 """.strip()
 
-    payload = rfp_text[:120000]  # keep bounded
+    payload = rfp_text[:120000]
 
-    resp = client.responses.create(
-        model="gpt-4.1-mini",
+    response = client.responses.parse(
+        model="gpt-4o-2024-08-06",
         input=[
             {"role": "system", "content": instructions},
             {"role": "user", "content": payload},
         ],
-        text={
-            "format": {
-                "type": "json_schema",
-                "schema": schema["schema"],
-            }
-        },
+        text_format=RfpAnalysis,
         store=False,
     )
 
-    return json.loads(resp.output_text)
-
+    # This is already parsed + validated to your schema
+    return response.output_parsed.model_dump()
 
 # =========================
 # Streamlit UI
