@@ -345,16 +345,20 @@ with colB:
         st.success("Cleared.")
         st.rerun()
 
+from openai import APIStatusError
+
+# ...
+
 if run_ai and uploads:
     try:
         full_text = "\n\n".join(extract_text(f) for f in uploads)
-        if not full_text.strip():
-            st.error("Could not extract any text from the upload(s). If PDF is scanned, OCR is needed.")
-        else:
-            with st.spinner("Analyzing…"):
-                result = analyze_rfp_with_ai(full_text)
-            st.session_state["ai"] = result
-            st.success("Analysis complete.")
+        with st.spinner("Analyzing…"):
+            result = analyze_rfp_with_ai(full_text)
+        st.session_state["ai"] = result
+        st.success("Analysis complete.")
+    except APIStatusError as e:
+        st.error(f"OpenAI API error {e.status_code}: {e.message}")
+        st.code(getattr(e, "response", None).text if getattr(e, "response", None) else "No response body")
     except Exception as e:
         st.exception(e)
 
