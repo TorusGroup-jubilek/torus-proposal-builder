@@ -1,19 +1,19 @@
 # torus_proposal_app.py
 # Torus Group – Cleaning Service Agreement Builder with AI RFP/PWS Analyzer (Streamlit Cloud-safe)
-# NORMAL LAYOUT (no form), with:
+# SINGLE FORM STYLE (no sidebar), with:
 # ✅ Dynamic “Additional Room Types” (name + count)
-# ✅ Standard Room Counts (offices, conference rooms, break rooms, bathrooms)
+# ✅ Optional consumables (only show if selected)
 # ✅ Standard cover letter (auto-fills Client Name) + toggle + editable
-# ✅ Dynamic cleaning schedule table (add/edit rows)
+# ✅ Dynamic cleaning schedule table
 # ✅ Word template support (proposal_template.docx)
-# ✅ Bullet-style fallback (prevents KeyError on List Bullet)
+# ✅ Bullet-style fallback (prevents KeyError on missing bullet styles)
 
 import os
 import json
 import datetime
 from io import BytesIO
 from dataclasses import dataclass, asdict
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 import streamlit as st
 import pandas as pd
@@ -49,10 +49,10 @@ class ProposalInputs:
     # Custom room types
     custom_rooms: List[Dict[str, int]]
 
-    # Consumables
-    hand_soap: str
-    paper_towels: str
-    toilet_paper: str
+    # Consumables (optional)
+    hand_soap: Optional[str]
+    paper_towels: Optional[str]
+    toilet_paper: Optional[str]
 
     # Cover page
     include_cover_page: bool
@@ -158,10 +158,7 @@ def extract_text(uploaded_file) -> str:
 # WORD HELPERS
 # =========================
 def add_bullet_paragraph(doc: Document, text: str):
-    """
-    Adds a bullet paragraph. Uses a bullet style if it exists in the template,
-    otherwise falls back to a manual bullet so it never crashes.
-    """
+    """Use a bullet style if present; otherwise safe manual bullet so template differences never crash."""
     for style_name in ("List Bullet", "List Paragraph", "Bullet List"):
         try:
             doc.add_paragraph(text, style=style_name)
@@ -172,7 +169,6 @@ def add_bullet_paragraph(doc: Document, text: str):
 
 
 def add_cover_page(doc: Document, client: str, body: str):
-    # Letterhead/header should already be in proposal_template.docx
     doc.add_paragraph(client)
     doc.add_paragraph("")
     doc.add_paragraph("Attn: ______________________")
@@ -193,10 +189,7 @@ def add_cover_page(doc: Document, client: str, body: str):
 
 def add_scope_table(doc: Document, rows: List[tuple]):
     title = doc.add_paragraph("SCOPE OF WORK – CLEANING SCHEDULE")
-    if title.runs:
-        title.runs[0].bold = True
-    else:
-        title.add_run("SCOPE OF WORK – CLEANING SCHEDULE").bold = True
+    (title.runs[0] if title.runs else title.add_run("SCOPE OF WORK – CLEANING SCHEDULE")).bold = True
 
     table = doc.add_table(rows=1, cols=4)
     table.style = "Table Grid"
@@ -222,21 +215,18 @@ def build_doc(p: ProposalInputs, schedule_rows: List[tuple]) -> bytes:
     template_path = "proposal_template.docx"
     doc = Document(template_path) if os.path.exists(template_path) else Document()
 
-    # Ensure headers show on first page even if template has "Different First Page"
     for s in doc.sections:
         s.different_first_page_header_footer = False
 
     # Optional cover page
     if p.include_cover_page:
-        add_cover_page(doc, p.client or "[Client Name]", p.cover_letter_body)
+        client_for_letter = p.client.strip() if p.client.strip() else "[Client Name]"
+        add_cover_page(doc, client_for_letter, p.cover_letter_body)
 
     # Agreement title
     title = doc.add_paragraph("CLEANING SERVICE AGREEMENT")
     title.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    if title.runs:
-        title.runs[0].bold = True
-    else:
-        title.add_run("CLEANING SERVICE AGREEMENT").bold = True
+    (title.runs[0] if title.runs else title.add_run("CLEANING SERVICE AGREEMENT")).bold = True
 
     # Basic info
     doc.add_paragraph(f"Client: {p.client}")
@@ -251,7 +241,7 @@ def build_doc(p: ProposalInputs, schedule_rows: List[tuple]) -> bytes:
 
     doc.add_paragraph("")
 
-    # Required paragraphs (date is blank for typing)
+    # Required paragraphs (agreement date blank)
     client_name = p.client.strip() if p.client.strip() else "[Client Name]"
     doc.add_paragraph(
         f"{client_name}, ('Client'), enters into this agreement on this date ______________ "
@@ -268,19 +258,16 @@ def build_doc(p: ProposalInputs, schedule_rows: List[tuple]) -> bytes:
 
     doc.add_paragraph("")
 
-    # Room counts section
+    # Room counts
     h = doc.add_paragraph("ROOM COUNTS")
-    if h.runs:
-        h.runs[0].bold = True
-    else:
-        h.add_run("ROOM COUNTS").bold = True
+    (h.runs[0] if h.runs else h.add_run("ROOM COUNTS")).bold = True
 
     add_bullet_paragraph(doc, f"Offices: {p.num_offices}")
     add_bullet_paragraph(doc, f"Conference rooms: {p.num_conference_rooms}")
     add_bullet_paragraph(doc, f"Break rooms: {p.num_break_rooms}")
     add_bullet_paragraph(doc, f"Bathrooms: {p.num_bathrooms}")
 
-    # Custom room types (named in-app)
+    # Custom room types
     custom = []
     for r in (p.custom_rooms or []):
         rt = str(r.get("type", "")).strip()
@@ -295,7 +282,7 @@ def build_doc(p: ProposalInputs, schedule_rows: List[tuple]) -> bytes:
 
     doc.add_paragraph("")
 
-    # Scope of work schedule table
+    # Scope table
     add_scope_table(doc, schedule_rows)
 
     # Optional Cleaning Plan
@@ -305,48 +292,51 @@ def build_doc(p: ProposalInputs, schedule_rows: List[tuple]) -> bytes:
         doc.add_paragraph(p.cleaning_plan.strip())
         doc.add_paragraph("")
 
-    # General requirements from consumables
+    # General Requirements (only show consumables that are selected)
     h = doc.add_paragraph("GENERAL REQUIREMENTS")
     (h.runs[0] if h.runs else h.add_run("GENERAL REQUIREMENTS")).bold = True
     doc.add_paragraph(
         "Contractor shall provide all labor, supervision, and personnel necessary to perform the services "
         "described in this agreement. Unless otherwise stated, Contractor shall provide all standard equipment "
-        "and cleaning supplies.\n\n"
-        "Consumable supplies:\n"
-        f"• Hand soap: {p.hand_soap}\n"
-        f"• Paper towels: {p.paper_towels}\n"
-        f"• Toilet paper: {p.toilet_paper}\n"
+        "and cleaning supplies."
     )
 
+    consumables_lines = []
+    if p.hand_soap:
+        consumables_lines.append(f"• Hand soap: {p.hand_soap}")
+    if p.paper_towels:
+        consumables_lines.append(f"• Paper towels: {p.paper_towels}")
+    if p.toilet_paper:
+        consumables_lines.append(f"• Toilet paper: {p.toilet_paper}")
+
+    if consumables_lines:
+        doc.add_paragraph("")
+        doc.add_paragraph("Consumable supplies:")
+        for line in consumables_lines:
+            doc.add_paragraph(line)
+
     # Notes
+    doc.add_paragraph("")
     doc.add_paragraph("NOTES")
     doc.add_paragraph((p.notes or "").strip() or "(none)")
 
-    # Save
     bio = BytesIO()
     doc.save(bio)
     return bio.getvalue()
 
 
 # =========================
-# STREAMLIT UI (Normal layout)
+# STREAMLIT UI (Single form style)
 # =========================
 st.set_page_config(layout="wide")
 st.title("Torus Group – Cleaning Proposal Builder")
 
-# Session state defaults
+# Session defaults
 st.session_state.setdefault("ai", None)
-st.session_state.setdefault("cleaning_plan_prefill", "")
-st.session_state.setdefault("schedule_rows_prefill", None)
-
-# Standard cover letter behavior
+st.session_state.setdefault("schedule_df", None)
+st.session_state.setdefault("custom_rooms", [{"type": "", "count": 0}])
 st.session_state.setdefault("cover_body_custom", "")
 
-# Dynamic custom rooms
-if "custom_rooms" not in st.session_state:
-    st.session_state["custom_rooms"] = [{"type": "", "count": 0}]
-
-# Schedule DF
 default_schedule_rows = [
     ("Empty trash & replace liners", True, False, False),
     ("Clean & disinfect restrooms", True, False, False),
@@ -359,68 +349,72 @@ default_schedule_rows = [
     ("High dusting (vents/ledges)", False, False, True),
     ("Detail baseboards/edges", False, False, True),
 ]
-if "schedule_df" not in st.session_state:
+
+if st.session_state["schedule_df"] is None:
     st.session_state["schedule_df"] = pd.DataFrame(
         default_schedule_rows, columns=["Task", "Daily", "Weekly", "Monthly"]
     )
 
-# Sidebar inputs (normal layout)
-with st.sidebar:
-    st.header("Proposal Inputs")
-    st.caption(f"OpenAI key loaded: {bool(st.secrets.get('OPENAI_API_KEY'))}")
-    st.caption(f"Template found: {os.path.exists('proposal_template.docx')}")
-
-    client = st.text_input("Client", value="")
-    facility = st.text_input("Facility name", value="")
-
-    service_begin_date = st.text_input("Service begin date", value="")
-    service_end_date = st.text_input("Service end date", value="")
-
-    days = st.number_input("Days per week", min_value=1, value=5)
-    times = st.text_input("Cleaning times (e.g., 6 PM – 10 PM)", value="")
+# One form for clean UX
+with st.form("proposal_form", clear_on_submit=False):
+    st.subheader("Client & Contract")
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        client = st.text_input("Client", value="")
+        facility = st.text_input("Facility name", value="")
+    with c2:
+        service_begin_date = st.text_input("Service begin date", value="")
+        service_end_date = st.text_input("Service end date", value="")
+    with c3:
+        days = st.number_input("Days per week", min_value=1, value=5)
+        times = st.text_input("Cleaning times (e.g., 6 PM – 10 PM)", value="")
 
     st.subheader("Service Addresses")
-    addresses = st.text_area("One address per line").splitlines()
+    addresses_text = st.text_area("One address per line", height=110)
 
     st.subheader("Room Counts (Standard)")
-    offices = st.number_input("Offices", min_value=0, value=0)
-    conference = st.number_input("Conference rooms", min_value=0, value=0)
-    breaks = st.number_input("Break rooms", min_value=0, value=0)
-    baths = st.number_input("Bathrooms", min_value=0, value=0)
+    r1, r2, r3, r4 = st.columns(4)
+    with r1:
+        offices = st.number_input("Offices", min_value=0, value=0)
+    with r2:
+        conference = st.number_input("Conference rooms", min_value=0, value=0)
+    with r3:
+        breaks = st.number_input("Break rooms", min_value=0, value=0)
+    with r4:
+        baths = st.number_input("Bathrooms", min_value=0, value=0)
 
-    st.subheader("Additional Room Types")
-    st.caption("Add any room type and count (e.g., Exam rooms, Classrooms, Server rooms).")
+    st.subheader("Additional Room Types (Name + Count)")
+    st.caption("Add any room type (e.g., Exam rooms, Classrooms, Server rooms) and set the count.")
 
+    # Render custom rooms inside the form using session state
     for i, room in enumerate(st.session_state["custom_rooms"]):
-        c1, c2, c3 = st.columns([3, 1, 1])
+        c1, c2 = st.columns([3, 1])
         with c1:
             st.session_state["custom_rooms"][i]["type"] = st.text_input(
-                f"room_type_{i}",
+                f"custom_room_type_{i}",
                 value=room.get("type", ""),
-                placeholder="e.g., Exam Rooms",
-                label_visibility="collapsed",
+                placeholder="Room type name",
             )
         with c2:
             st.session_state["custom_rooms"][i]["count"] = st.number_input(
-                f"room_count_{i}",
+                f"custom_room_count_{i}",
                 min_value=0,
                 step=1,
                 value=int(room.get("count", 0) or 0),
-                label_visibility="collapsed",
             )
-        with c3:
-            if st.button("Remove", key=f"remove_room_{i}") and len(st.session_state["custom_rooms"]) > 1:
-                st.session_state["custom_rooms"].pop(i)
-                st.rerun()
 
-    if st.button("Add another room type"):
-        st.session_state["custom_rooms"].append({"type": "", "count": 0})
-        st.rerun()
+    add_room = st.checkbox("Add another custom room type", value=False)
 
-    st.subheader("Consumables")
-    soap = st.selectbox("Hand soap", ["Contractor", "Client"])
-    towels = st.selectbox("Paper towels", ["Contractor", "Client"])
-    tp = st.selectbox("Toilet paper", ["Contractor", "Client"])
+    st.subheader("Consumables (Optional)")
+    st.caption("Leave blank if not included. Only selected items will appear in the agreement.")
+
+    cA, cB, cC = st.columns(3)
+    with cA:
+        hand_soap = st.selectbox("Hand soap", ["(leave blank)", "Contractor", "Client"], index=0)
+    with cB:
+        paper_towels = st.selectbox("Paper towels", ["(leave blank)", "Contractor", "Client"], index=0)
+    with cC:
+        toilet_paper = st.selectbox("Toilet paper", ["(leave blank)", "Contractor", "Client"], index=0)
 
     st.subheader("Cover Page")
     include_cover = st.checkbox("Include cover page", value=True)
@@ -428,72 +422,83 @@ with st.sidebar:
     use_standard_cover = st.checkbox("Use Torus standard cover letter", value=True)
     if use_standard_cover:
         cover_body = default_cover_letter(client)
+        st.text_area("Cover letter (preview)", value=cover_body, height=240, disabled=True)
     else:
         cover_body = st.text_area(
             "Cover letter body",
             value=st.session_state.get("cover_body_custom", ""),
-            height=260
+            height=240
         )
-        st.session_state["cover_body_custom"] = cover_body
 
-# Main page optional sections
-st.subheader("Cleaning Plan")
-cleaning_plan = st.text_area("Cleaning Plan (optional)", value=st.session_state["cleaning_plan_prefill"], height=160)
+    st.subheader("Cleaning Plan & Notes")
+    cleaning_plan = st.text_area("Cleaning Plan (optional)", height=140)
+    notes = st.text_area("Notes", height=120)
 
-st.subheader("Notes")
-notes = st.text_area("Notes", height=120)
+    st.subheader("Cleaning Schedule")
+    st.caption("Edit tasks freely. Add new rows at the bottom.")
+    schedule_df = st.data_editor(
+        st.session_state["schedule_df"],
+        num_rows="dynamic",
+        use_container_width=True,
+        height=320,
+    )
 
-# Cleaning schedule editor (dynamic)
-st.subheader("Cleaning Schedule")
-st.caption("Add, remove, or edit tasks below. Use the last row to add new cleaning tasks.")
+    st.subheader("RFP / PWS Analyzer (Optional)")
+    uploads = st.file_uploader("Upload RFP/PWS", type=["pdf", "docx", "txt"], accept_multiple_files=True)
 
-st.session_state["schedule_df"] = st.data_editor(
-    st.session_state["schedule_df"],
-    num_rows="dynamic",
-    use_container_width=True,
-    height=320,
-)
+    col1, col2, col3 = st.columns([1, 1, 2])
+    with col1:
+        analyze_btn = st.form_submit_button("Analyze with AI")
+    with col2:
+        generate_btn = st.form_submit_button("Generate Proposal")
+    with col3:
+        st.caption(f"Template found: {os.path.exists('proposal_template.docx')}")
 
-# Convert schedule DF to tuples; ignore blank tasks
+# Post-form: update session state objects
+st.session_state["schedule_df"] = schedule_df
+if add_room:
+    st.session_state["custom_rooms"].append({"type": "", "count": 0})
+    st.rerun()
+
+# Normalize consumables (blank -> None)
+hand_soap_val = None if hand_soap == "(leave blank)" else hand_soap
+paper_towels_val = None if paper_towels == "(leave blank)" else paper_towels
+toilet_paper_val = None if toilet_paper == "(leave blank)" else toilet_paper
+
+# Persist custom cover letter edits
+if not use_standard_cover:
+    st.session_state["cover_body_custom"] = cover_body
+
+# Parse addresses
+addresses = [x.strip() for x in (addresses_text or "").splitlines() if x.strip()]
+
+# Convert schedule DF to tuples and skip blanks
 schedule_rows = [
     (r.Task, r.Daily, r.Weekly, r.Monthly)
     for r in st.session_state["schedule_df"].itertuples()
     if str(r.Task).strip()
 ]
 
-# =========================
-# AI ANALYZER
-# =========================
-st.divider()
-st.subheader("RFP / PWS Analyzer (AI)")
+# AI analysis
+if analyze_btn:
+    if not uploads:
+        st.error("Please upload at least one RFP/PWS file.")
+    else:
+        try:
+            full_text = "\n\n".join(extract_text(f) for f in uploads)
+            if not full_text.strip():
+                st.error("Could not extract text from the upload(s). If PDF is scanned, OCR is needed.")
+            else:
+                with st.spinner("Analyzing…"):
+                    st.session_state["ai"] = analyze_rfp_with_ai(full_text)
+                st.success("AI analysis complete.")
+        except Exception as e:
+            st.exception(e)
 
-uploads = st.file_uploader("Upload RFP/PWS", type=["pdf", "docx", "txt"], accept_multiple_files=True)
-
-colA, colB = st.columns([1, 2])
-with colA:
-    run_ai = st.button("Analyze with AI")
-with colB:
-    if st.button("Clear AI results"):
-        st.session_state["ai"] = None
-        st.session_state["cleaning_plan_prefill"] = ""
-        st.session_state["schedule_rows_prefill"] = None
-        st.success("Cleared.")
-        st.rerun()
-
-if run_ai and uploads:
-    try:
-        full_text = "\n\n".join(extract_text(f) for f in uploads)
-        if not full_text.strip():
-            st.error("Could not extract any text from the upload(s). If PDF is scanned, OCR is needed.")
-        else:
-            with st.spinner("Analyzing…"):
-                st.session_state["ai"] = analyze_rfp_with_ai(full_text)
-            st.success("Analysis complete.")
-    except Exception as e:
-        st.exception(e)
-
+# Show AI results and apply button
 if st.session_state.get("ai"):
     ai = st.session_state["ai"]
+    st.divider()
     st.subheader("AI Results")
     st.text_area("AI Cleaning Plan", ai.get("cleaning_plan_draft", ""), height=160)
     st.text_area("AI Scope of Work", ai.get("scope_of_work_draft", ""), height=160)
@@ -504,67 +509,62 @@ if st.session_state.get("ai"):
         for q in qs:
             st.write(f"- {q}")
 
-    if st.button("Apply AI to proposal"):
-        st.session_state["cleaning_plan_prefill"] = ai.get("cleaning_plan_draft", "")
-
-        # Apply schedule rows into the editor table
+    if st.button("Apply AI schedule to table"):
         rows = []
         for r in ai.get("schedule_rows", []):
             task = (r.get("task") or "").strip()
             if not task:
                 continue
-            rows.append((task, bool(r.get("daily", False)), bool(r.get("weekly", False)), bool(r.get("monthly", False))))
+            rows.append((task, bool(r.get("daily")), bool(r.get("weekly")), bool(r.get("monthly"))))
         if rows:
             st.session_state["schedule_df"] = pd.DataFrame(rows, columns=["Task", "Daily", "Weekly", "Monthly"])
-        st.success("Applied. Scroll up—Cleaning Plan and Schedule updated.")
-        st.rerun()
+            st.success("Applied AI schedule. Scroll up to see it in the table.")
+            st.rerun()
+        else:
+            st.warning("AI did not return usable schedule rows.")
 
-# =========================
-# BUILD + DOWNLOAD
-# =========================
-st.divider()
-st.subheader("Generate Proposal")
+# Generate proposal
+if generate_btn:
+    p = ProposalInputs(
+        client=client.strip(),
+        facility_name=facility.strip(),
+        service_begin_date=service_begin_date.strip(),
+        service_end_date=service_end_date.strip(),
+        service_addresses=addresses,
+        days_per_week=int(days),
+        cleaning_times=times.strip(),
 
-# Package inputs
-p = ProposalInputs(
-    client=client.strip(),
-    facility_name=facility.strip(),
-    service_begin_date=service_begin_date.strip(),
-    service_end_date=service_end_date.strip(),
-    service_addresses=addresses,
-    days_per_week=int(days),
-    cleaning_times=times.strip(),
+        num_offices=int(offices),
+        num_conference_rooms=int(conference),
+        num_break_rooms=int(breaks),
+        num_bathrooms=int(baths),
 
-    num_offices=int(offices),
-    num_conference_rooms=int(conference),
-    num_break_rooms=int(breaks),
-    num_bathrooms=int(baths),
+        custom_rooms=st.session_state.get("custom_rooms", []),
 
-    custom_rooms=st.session_state.get("custom_rooms", []),
+        hand_soap=hand_soap_val,
+        paper_towels=paper_towels_val,
+        toilet_paper=toilet_paper_val,
 
-    hand_soap=soap,
-    paper_towels=towels,
-    toilet_paper=tp,
+        include_cover_page=include_cover,
+        cover_letter_body=cover_body,
 
-    include_cover_page=include_cover,
-    cover_letter_body=cover_body,
+        cleaning_plan=cleaning_plan,
+        notes=notes,
+    )
 
-    cleaning_plan=cleaning_plan,
-    notes=notes,
-)
+    docx_bytes = build_doc(p, schedule_rows)
 
-docx_bytes = build_doc(p, schedule_rows)
+    st.success("Proposal generated.")
+    st.download_button(
+        "Download Word Proposal",
+        data=docx_bytes,
+        file_name=f"Torus_Cleaning_Agreement_{datetime.date.today().isoformat()}.docx",
+        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    )
 
-st.download_button(
-    "Download Word Proposal",
-    data=docx_bytes,
-    file_name=f"Torus_Cleaning_Agreement_{datetime.date.today().isoformat()}.docx",
-    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-)
-
-st.download_button(
-    "Download Inputs (JSON)",
-    data=json.dumps(asdict(p), indent=2).encode("utf-8"),
-    file_name=f"Torus_Inputs_{datetime.date.today().isoformat()}.json",
-    mime="application/json",
-)
+    st.download_button(
+        "Download Inputs (JSON)",
+        data=json.dumps(asdict(p), indent=2).encode("utf-8"),
+        file_name=f"Torus_Inputs_{datetime.date.today().isoformat()}.json",
+        mime="application/json",
+    )
