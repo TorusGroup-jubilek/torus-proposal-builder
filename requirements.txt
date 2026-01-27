@@ -2,5 +2,4 @@ streamlit
 python-docx
 pandas
 pypdf
-openai>=1.0.0
-pydantic>=2.0.0
+openai>=1.30.0
