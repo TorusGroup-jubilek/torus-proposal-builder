@@ -1,6 +1,3 @@
-# torus_proposal_app.py
-# Torus Group – Cleaning Service Agreement Builder with AI RFP/PWS Analyzer (Streamlit Cloud-safe)
-
 import os
 import json
 import datetime
@@ -32,11 +29,6 @@ class ProposalInputs:
     service_addresses: List[str]
     days_per_week: int
     cleaning_times: str
-    net_terms: int
-    sales_tax_percent: float
-
-    square_footage: int
-    floor_types: str
 
     num_offices: int
     num_conference_rooms: int
@@ -46,9 +38,6 @@ class ProposalInputs:
     hand_soap: str
     paper_towels: str
     toilet_paper: str
-
-    pricing_mode: str
-    monthly_price: float
 
     include_cover_page: bool
     cover_letter_body: str
@@ -67,14 +56,12 @@ def get_openai_client() -> OpenAI:
 
 
 # =========================
-# AI RFP ANALYSIS (STABLE ON STREAMLIT CLOUD)
+# AI RFP ANALYSIS (stable)
 # =========================
 def analyze_rfp_with_ai(text: str) -> Dict[str, Any]:
     client = get_openai_client()
 
     instructions = """
-You are assisting a janitorial contractor responding to an RFP or PWS.
-
 Return ONLY valid JSON with this exact structure:
 
 {
@@ -88,8 +75,7 @@ Return ONLY valid JSON with this exact structure:
 
 Rules:
 - JSON only (no markdown, no explanations)
-- Include realistic janitorial tasks
-- Keep schedule_rows to about 12–30 rows
+- Keep schedule_rows ~12–30 items
 """
 
     resp = client.chat.completions.create(
@@ -101,9 +87,7 @@ Rules:
         response_format={"type": "json_object"},
         temperature=0.2,
     )
-
-    content = resp.choices[0].message.content
-    return json.loads(content)
+    return json.loads(resp.choices[0].message.content)
 
 
 # =========================
@@ -131,25 +115,17 @@ def extract_text(uploaded_file) -> str:
 # WORD HELPERS
 # =========================
 def add_bullet_paragraph(doc: Document, text: str):
-    """
-    Adds a bullet paragraph. Uses a bullet style if it exists in the template,
-    otherwise falls back to a manual bullet so it never crashes.
-    """
-    bullet_style_candidates = ("List Bullet", "List Paragraph", "Bullet List")
-
-    for style_name in bullet_style_candidates:
+    """Use a bullet style if present; otherwise safe manual bullet so template differences never crash."""
+    for style_name in ("List Bullet", "List Paragraph", "Bullet List"):
         try:
             doc.add_paragraph(text, style=style_name)
             return
         except KeyError:
             continue
-
-    # Template has no bullet style → safe fallback
     doc.add_paragraph(f"• {text}")
 
 
 def add_cover_page(doc: Document, client: str, body: str):
-    # Letterhead/header should already be in proposal_template.docx
     doc.add_paragraph(client)
     doc.add_paragraph("")
     doc.add_paragraph("Attn: ______________________")
@@ -170,10 +146,7 @@ def add_cover_page(doc: Document, client: str, body: str):
 
 def add_scope_table(doc: Document, rows: List[tuple]):
     title = doc.add_paragraph("SCOPE OF WORK – CLEANING SCHEDULE")
-    if title.runs:
-        title.runs[0].bold = True
-    else:
-        title.add_run("SCOPE OF WORK – CLEANING SCHEDULE").bold = True
+    (title.runs[0] if title.runs else title.add_run("SCOPE OF WORK – CLEANING SCHEDULE")).bold = True
 
     table = doc.add_table(rows=1, cols=4)
     table.style = "Table Grid"
@@ -199,7 +172,6 @@ def build_doc(p: ProposalInputs, schedule_rows: List[tuple]) -> bytes:
     template_path = "proposal_template.docx"
     doc = Document(template_path) if os.path.exists(template_path) else Document()
 
-    # Ensure headers show on first page even if template has "Different First Page"
     for s in doc.sections:
         s.different_first_page_header_footer = False
 
@@ -208,10 +180,7 @@ def build_doc(p: ProposalInputs, schedule_rows: List[tuple]) -> bytes:
 
     title = doc.add_paragraph("CLEANING SERVICE AGREEMENT")
     title.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    if title.runs:
-        title.runs[0].bold = True
-    else:
-        title.add_run("CLEANING SERVICE AGREEMENT").bold = True
+    (title.runs[0] if title.runs else title.add_run("CLEANING SERVICE AGREEMENT")).bold = True
 
     doc.add_paragraph(f"Client: {p.client}")
     doc.add_paragraph(f"Facility: {p.facility_name}")
@@ -220,7 +189,6 @@ def build_doc(p: ProposalInputs, schedule_rows: List[tuple]) -> bytes:
     for a in (p.service_addresses or []):
         a2 = (a or "").strip()
         if a2:
-            # ✅ FIX: bullet helper prevents KeyError if template lacks 'List Bullet'
             add_bullet_paragraph(doc, a2)
 
     doc.add_paragraph("")
@@ -241,23 +209,14 @@ def build_doc(p: ProposalInputs, schedule_rows: List[tuple]) -> bytes:
 
     if (p.cleaning_plan or "").strip():
         h = doc.add_paragraph("CLEANING PLAN")
-        if h.runs:
-            h.runs[0].bold = True
-        else:
-            h.add_run("CLEANING PLAN").bold = True
+        (h.runs[0] if h.runs else h.add_run("CLEANING PLAN")).bold = True
         doc.add_paragraph(p.cleaning_plan.strip())
         doc.add_paragraph("")
 
     h = doc.add_paragraph("GENERAL REQUIREMENTS")
-    if h.runs:
-        h.runs[0].bold = True
-    else:
-        h.add_run("GENERAL REQUIREMENTS").bold = True
-
+    (h.runs[0] if h.runs else h.add_run("GENERAL REQUIREMENTS")).bold = True
     doc.add_paragraph(
-        "Contractor shall provide all labor, supervision, and personnel necessary to perform the services "
-        "described in this agreement. Unless otherwise stated, Contractor shall provide all standard equipment "
-        "and cleaning supplies.\n\n"
+        "Contractor shall provide all labor, supervision, and personnel necessary to perform the services described.\n\n"
         "Consumable supplies:\n"
         f"• Hand soap: {p.hand_soap}\n"
         f"• Paper towels: {p.paper_towels}\n"
@@ -273,58 +232,36 @@ def build_doc(p: ProposalInputs, schedule_rows: List[tuple]) -> bytes:
 
 
 # =========================
-# STREAMLIT UI
+# APP UI
 # =========================
 st.set_page_config(layout="wide")
 st.title("Torus Group – Cleaning Proposal Builder")
 
-# Persist “apply AI” results across reruns
-st.session_state.setdefault("cleaning_plan_prefill", "")
-st.session_state.setdefault("schedule_rows_prefill", None)
+# Hide Streamlit UI elements that often create bottom “white bar” / layout shifts
+st.markdown(
+    """
+<style>
+/* Hide Streamlit footer/menu/toolbar/status */
+#MainMenu { visibility: hidden; }
+footer { visibility: hidden; }
+header { visibility: hidden; }
+div[data-testid="stToolbar"] { visibility: hidden; height: 0px; }
+div[data-testid="stStatusWidget"] { visibility: hidden; height: 0px; }
 
-with st.sidebar:
-    st.header("Proposal Inputs")
-    st.caption(f"OpenAI key loaded: {bool(st.secrets.get('OPENAI_API_KEY'))}")
-    st.caption(f"Template found: {os.path.exists('proposal_template.docx')}")
+/* Reduce bottom padding that can look like a blank bar */
+div.block-container { padding-bottom: 1rem; }
 
-    client = st.text_input("Client")
-    facility = st.text_input("Facility name")
+/* In some Streamlit builds, this bottom container shows as a white block */
+div[data-testid="stBottomBlockContainer"] { display: none; }
+</style>
+""",
+    unsafe_allow_html=True,
+)
 
-    service_begin_date = st.text_input("Service begin date")
-    service_end_date = st.text_input("Service end date")
+# Session defaults
+st.session_state.setdefault("ai", None)
 
-    days = st.number_input("Days per week", min_value=1, value=5)
-    times = st.text_input("Cleaning times (e.g., 6 PM – 10 PM)")
-
-    st.subheader("Service Addresses")
-    addresses = st.text_area("One address per line").splitlines()
-
-    st.subheader("Room Counts")
-    offices = st.number_input("Offices", min_value=0)
-    conference = st.number_input("Conference rooms", min_value=0)
-    breaks = st.number_input("Break rooms", min_value=0)
-    baths = st.number_input("Bathrooms", min_value=0)
-
-    st.subheader("Consumables")
-    soap = st.selectbox("Hand soap", ["Contractor", "Client"])
-    towels = st.selectbox("Paper towels", ["Contractor", "Client"])
-    tp = st.selectbox("Toilet paper", ["Contractor", "Client"])
-
-    st.subheader("Cover Page")
-    include_cover = st.checkbox("Include cover page", True)
-    cover_body = st.text_area("Cover letter body")
-
-st.subheader("Cleaning Plan")
-cleaning_plan = st.text_area("Cleaning Plan (optional)", value=st.session_state["cleaning_plan_prefill"])
-
-st.subheader("Notes")
-notes = st.text_area("Notes")
-
-# Schedule editor (dynamic; you can add/edit/remove tasks)
-st.subheader("Cleaning Schedule")
-st.caption("Add, remove, or edit tasks below. Use the last row to add new cleaning tasks.")
-
-default_rows = [
+default_schedule_rows = [
     ("Empty trash & replace liners", True, False, False),
     ("Clean & disinfect restrooms", True, False, False),
     ("Vacuum carpet / sweep hard floors", True, False, False),
@@ -337,53 +274,107 @@ default_rows = [
     ("Detail baseboards/edges", False, False, True),
 ]
 
-prefill_rows = st.session_state["schedule_rows_prefill"] or default_rows
-df = pd.DataFrame(prefill_rows, columns=["Task", "Daily", "Weekly", "Monthly"])
-edited = st.data_editor(df, num_rows="dynamic", use_container_width=True)
+if "schedule_df" not in st.session_state:
+    st.session_state["schedule_df"] = pd.DataFrame(
+        default_schedule_rows, columns=["Task", "Daily", "Weekly", "Monthly"]
+    )
 
-# Convert edited schedule to tuples; ignore blank tasks
-schedule_rows = [
-    (r.Task, r.Daily, r.Weekly, r.Monthly)
-    for r in edited.itertuples()
-    if str(r.Task).strip()
-]
+# --- ONE FORM (inputs + schedule + AI upload) ---
+with st.form("proposal_form", clear_on_submit=False):
+    st.subheader("Client & Contract")
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        client = st.text_input("Client (legal name)")
+        facility = st.text_input("Facility / Location name")
+    with c2:
+        service_begin_date = st.text_input("Service begin date")
+        service_end_date = st.text_input("Service end date")
+    with c3:
+        days = st.number_input("Days per week", min_value=1, value=5)
+        times = st.text_input("Cleaning times (e.g., 6 PM – 10 PM)")
 
-# =========================
-# AI ANALYZER
-# =========================
-st.divider()
-st.subheader("RFP / PWS Analyzer (AI)")
+    st.subheader("Service Addresses")
+    addresses_text = st.text_area("One address per line", height=120)
 
-uploads = st.file_uploader("Upload RFP/PWS", type=["pdf", "docx", "txt"], accept_multiple_files=True)
+    st.subheader("Room Counts")
+    r1, r2, r3, r4 = st.columns(4)
+    with r1:
+        offices = st.number_input("Offices", min_value=0)
+    with r2:
+        conference = st.number_input("Conference rooms", min_value=0)
+    with r3:
+        breaks = st.number_input("Break rooms", min_value=0)
+    with r4:
+        baths = st.number_input("Bathrooms", min_value=0)
 
-colA, colB = st.columns([1, 2])
-with colA:
-    run_ai = st.button("Analyze with AI")
-with colB:
-    if st.button("Clear AI results"):
-        for k in ["ai", "cleaning_plan_prefill", "schedule_rows_prefill"]:
-            if k in st.session_state:
-                del st.session_state[k]
-        st.session_state["cleaning_plan_prefill"] = ""
-        st.session_state["schedule_rows_prefill"] = None
-        st.success("Cleared.")
-        st.rerun()
+    st.subheader("Consumables")
+    s1, s2, s3 = st.columns(3)
+    with s1:
+        soap = st.selectbox("Hand soap", ["Contractor", "Client"])
+    with s2:
+        towels = st.selectbox("Paper towels", ["Contractor", "Client"])
+    with s3:
+        tp = st.selectbox("Toilet paper", ["Contractor", "Client"])
 
-if run_ai and uploads:
-    try:
-        full_text = "\n\n".join(extract_text(f) for f in uploads)
-        if not full_text.strip():
-            st.error("Could not extract any text from the upload(s). If PDF is scanned, OCR is needed.")
-        else:
-            with st.spinner("Analyzing…"):
-                result = analyze_rfp_with_ai(full_text)
-            st.session_state["ai"] = result
-            st.success("Analysis complete.")
-    except Exception as e:
-        st.exception(e)
+    st.subheader("Cover Page")
+    include_cover = st.checkbox("Include cover page", True)
+    cover_body = st.text_area("Cover letter body", height=120)
 
-if "ai" in st.session_state:
+    st.subheader("Cleaning Plan & Notes")
+    cleaning_plan = st.text_area("Cleaning Plan (optional)", height=140)
+    notes = st.text_area("Notes", height=100)
+
+    st.subheader("Cleaning Schedule")
+    st.caption("Edit tasks freely. Add new rows at the bottom.")
+    schedule_df = st.data_editor(
+        st.session_state["schedule_df"],
+        num_rows="dynamic",
+        use_container_width=True,
+        height=320,
+    )
+
+    st.subheader("RFP / PWS Analyzer (optional)")
+    uploads = st.file_uploader(
+        "Upload RFP/PWS (PDF, DOCX, TXT)",
+        type=["pdf", "docx", "txt"],
+        accept_multiple_files=True,
+    )
+
+    colA, colB, colC = st.columns([1, 1, 2])
+    with colA:
+        run_ai = st.form_submit_button("Analyze with AI")
+    with colB:
+        generate_doc = st.form_submit_button("Generate Proposal")
+    with colC:
+        st.caption(f"Template found: {os.path.exists('proposal_template.docx')}")
+
+# Keep schedule edits in session
+st.session_state["schedule_df"] = schedule_df
+
+# Parse addresses
+addresses = [x.strip() for x in (addresses_text or "").splitlines() if x.strip()]
+
+# Analyze AI on submit
+if run_ai:
+    if not uploads:
+        st.error("Please upload at least one RFP/PWS file.")
+    else:
+        try:
+            full_text = "\n\n".join(extract_text(f) for f in uploads)
+            if not full_text.strip():
+                st.error("Could not extract text from the upload(s). If PDF is scanned, OCR is needed.")
+            else:
+                with st.spinner("Analyzing…"):
+                    st.session_state["ai"] = analyze_rfp_with_ai(full_text)
+                st.success("AI analysis complete.")
+        except Exception as e:
+            st.exception(e)
+
+# Show AI results (outside the form, so it doesn’t shift inputs)
+if st.session_state.get("ai"):
     ai = st.session_state["ai"]
+    st.divider()
+    st.subheader("AI Results")
     st.text_area("AI Cleaning Plan", ai.get("cleaning_plan_draft", ""), height=160)
     st.text_area("AI Scope of Work", ai.get("scope_of_work_draft", ""), height=160)
 
@@ -393,58 +384,63 @@ if "ai" in st.session_state:
         for q in qs:
             st.write(f"- {q}")
 
-    if st.button("Apply AI to proposal"):
-        st.session_state["cleaning_plan_prefill"] = ai.get("cleaning_plan_draft", "")
-        st.session_state["schedule_rows_prefill"] = [
-            (r.get("task", ""), bool(r.get("daily", False)), bool(r.get("weekly", False)), bool(r.get("monthly", False)))
-            for r in ai.get("schedule_rows", [])
-            if (r.get("task") or "").strip()
-        ] or None
-        st.success("Applied. Scroll up—your Cleaning Plan and Schedule are now prefilled.")
-        st.rerun()
+    # Apply AI to schedule/editor
+    if st.button("Apply AI schedule to table"):
+        rows = []
+        for r in ai.get("schedule_rows", []):
+            task = (r.get("task") or "").strip()
+            if not task:
+                continue
+            rows.append((task, bool(r.get("daily")), bool(r.get("weekly")), bool(r.get("monthly"))))
+        if rows:
+            st.session_state["schedule_df"] = pd.DataFrame(rows, columns=["Task", "Daily", "Weekly", "Monthly"])
+            st.success("Applied AI schedule. Scroll up to see it in the table.")
+        else:
+            st.warning("AI did not return usable schedule rows.")
 
-# =========================
-# BUILD + DOWNLOAD
-# =========================
-p = ProposalInputs(
-    client=client,
-    facility_name=facility,
-    service_begin_date=service_begin_date,
-    service_end_date=service_end_date,
-    service_addresses=addresses,
-    days_per_week=int(days),
-    cleaning_times=times,
-    net_terms=30,
-    sales_tax_percent=0.0,
-    square_footage=0,
-    floor_types="",
-    num_offices=int(offices),
-    num_conference_rooms=int(conference),
-    num_break_rooms=int(breaks),
-    num_bathrooms=int(baths),
-    hand_soap=soap,
-    paper_towels=towels,
-    toilet_paper=tp,
-    pricing_mode="Monthly",
-    monthly_price=0.0,
-    include_cover_page=include_cover,
-    cover_letter_body=cover_body,
-    cleaning_plan=cleaning_plan,
-    notes=notes,
-)
+# Generate proposal
+if generate_doc:
+    p = ProposalInputs(
+        client=client,
+        facility_name=facility,
+        service_begin_date=service_begin_date,
+        service_end_date=service_end_date,
+        service_addresses=addresses,
+        days_per_week=int(days),
+        cleaning_times=times,
+        num_offices=int(offices),
+        num_conference_rooms=int(conference),
+        num_break_rooms=int(breaks),
+        num_bathrooms=int(baths),
+        hand_soap=soap,
+        paper_towels=towels,
+        toilet_paper=tp,
+        include_cover_page=include_cover,
+        cover_letter_body=cover_body,
+        cleaning_plan=cleaning_plan,
+        notes=notes,
+    )
 
-docx_bytes = build_doc(p, schedule_rows)
+    # Convert schedule DF to tuples and skip blanks
+    schedule_rows = [
+        (r.Task, r.Daily, r.Weekly, r.Monthly)
+        for r in st.session_state["schedule_df"].itertuples()
+        if str(r.Task).strip()
+    ]
 
-st.download_button(
-    "Download Word Proposal",
-    data=docx_bytes,
-    file_name=f"Torus_Cleaning_Agreement_{datetime.date.today().isoformat()}.docx",
-    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-)
+    docx_bytes = build_doc(p, schedule_rows)
 
-st.download_button(
-    "Download Inputs (JSON)",
-    data=json.dumps(asdict(p), indent=2).encode("utf-8"),
-    file_name=f"Torus_Inputs_{datetime.date.today().isoformat()}.json",
-    mime="application/json",
-)
+    st.success("Proposal generated.")
+    st.download_button(
+        "Download Word Proposal",
+        data=docx_bytes,
+        file_name=f"Torus_Cleaning_Agreement_{datetime.date.today().isoformat()}.docx",
+        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    )
+
+    st.download_button(
+        "Download Inputs (JSON)",
+        data=json.dumps(asdict(p), indent=2).encode("utf-8"),
+        file_name=f"Torus_Inputs_{datetime.date.today().isoformat()}.json",
+        mime="application/json",
+    )
