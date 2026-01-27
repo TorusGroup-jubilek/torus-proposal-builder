@@ -51,7 +51,7 @@ class ProposalInputs:
     trash_pickup: str
     restocking_needed: str  # Yes/No
 
-    # Consumables (replaces "supplies included")
+    # Consumables
     hand_soap: str
     paper_towels: str
     toilet_paper: str
@@ -70,7 +70,7 @@ class ProposalInputs:
     deep_clean_includes: List[str]
 
     # Add-ons
-    additional_services: List[Dict[str, float]]  # [{"name": str, "price": float}]
+    additional_services: List[Dict[str, float]]
     include_addons_in_total: str  # Yes/No
 
     # Compensation
@@ -79,6 +79,10 @@ class ProposalInputs:
 
     # Optional section
     cleaning_plan: str
+
+    # Cover page options
+    include_cover_page: bool
+    cover_letter_body: str
 
     # Notes
     notes: str
@@ -282,6 +286,29 @@ def add_address_bullets(doc: Document, addresses: List[str]):
         doc.add_paragraph(a, style="List Bullet")
 
 
+def add_cover_page(doc: Document, client_name: str, body: str):
+    paragraphs = [
+        client_name,
+        "",
+        "Attn: ______________________",
+        "",
+        "Re: Janitorial Services Proposal",
+        "",
+        f"Dear {client_name},",
+        "",
+        body if body else "",
+        "",
+        "Respectfully,",
+        "",
+        "Kara Jubilee",
+        "President",
+        "Torus Cleaning Services",
+    ]
+    for line in paragraphs:
+        doc.add_paragraph(line)
+    doc.add_page_break()
+
+
 # =========================
 # Agreement text
 # =========================
@@ -447,11 +474,15 @@ Contractor Authorized Signature: ___________________________   Date: ___________
 
 
 # =========================
-# Word export (uses template if present)
+# Word export
 # =========================
-def docx_from_agreement(text: str, schedule_rows: list, addresses: List[str]) -> bytes:
+def docx_from_agreement(text: str, schedule_rows: list, addresses: List[str], p: ProposalInputs) -> bytes:
     template_path = "proposal_template.docx"
     doc = Document(template_path) if os.path.exists(template_path) else Document()
+
+    # Cover page injection (optional)
+    if p.include_cover_page:
+        add_cover_page(doc, p.client, p.cover_letter_body)
 
     for line in text.splitlines():
         s = line.strip()
@@ -461,9 +492,9 @@ def docx_from_agreement(text: str, schedule_rows: list, addresses: List[str]) ->
             continue
 
         if s == "CLEANING SERVICE AGREEMENT":
-            p = doc.add_paragraph()
-            p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-            run = p.add_run(s)
+            para = doc.add_paragraph()
+            para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            run = para.add_run(s)
             run.bold = True
             continue
 
@@ -520,6 +551,9 @@ with st.sidebar:
     hand_soap = st.selectbox("Hand soap", ["Provided by Contractor", "Provided by Client"])
     paper_towels = st.selectbox("Paper towels", ["Provided by Contractor", "Provided by Client"])
     toilet_paper = st.selectbox("Toilet paper", ["Provided by Contractor", "Provided by Client"])
+
+    st.header("Cover Page")
+    include_cover_page = st.checkbox("Include cover page", value=True)
 
 c1, c2, c3 = st.columns(3)
 
@@ -584,6 +618,13 @@ with c3:
             if st.checkbox("Glass detailing"):
                 deep_clean_includes.append("Glass detailing (interior as applicable)")
 
+    st.subheader("Cover Letter (optional)")
+    cover_letter_body = st.text_area(
+        "Cover Letter Body",
+        height=220,
+        placeholder="This text will appear on the cover page introduction letter..."
+    )
+
     st.subheader("Cleaning Plan (optional)")
     cleaning_plan = st.text_area(
         "Cleaning Plan",
@@ -596,7 +637,7 @@ with c3:
 
 st.divider()
 
-# Service addresses (multi)
+# Service addresses
 st.subheader("Service Address(es)")
 st.caption("Add one or more addresses for this agreement.")
 
@@ -668,8 +709,6 @@ compensation_mode = st.selectbox("Compensation mode", ["Auto (calculated)", "Ove
 compensation_override = 0.0
 if compensation_mode == "Override":
     compensation_override = st.number_input("Compensation override ($ per month)", min_value=0.0, step=50.0, value=0.0)
-    st.caption("This is what will be shown as Compensation in the agreement, regardless of totals.")
-
 
 # Build inputs
 p = ProposalInputs(
@@ -712,6 +751,8 @@ p = ProposalInputs(
     compensation_mode=compensation_mode,
     compensation_override=float(compensation_override),
     cleaning_plan=cleaning_plan.strip(),
+    include_cover_page=include_cover_page,
+    cover_letter_body=cover_letter_body.strip(),
     notes=notes.strip(),
 )
 
@@ -727,7 +768,6 @@ t4.metric("Compensation (monthly)", money(totals["compensation_monthly"]))
 # Schedule tuning
 st.divider()
 st.subheader("Scope of Work — Schedule Tuning")
-st.caption("Adjust tasks and frequency for this job. This controls the schedule table in the Word agreement.")
 
 default_rows = compute_cleaning_schedule(p)
 default_df = schedule_rows_to_df(default_rows)
@@ -771,7 +811,12 @@ with colA:
     )
 
 with colB:
-    docx_data = docx_from_agreement(agreement_text, tuned_schedule_rows, clean_list(st.session_state.service_addresses))
+    docx_data = docx_from_agreement(
+        agreement_text,
+        tuned_schedule_rows,
+        clean_list(st.session_state.service_addresses),
+        p
+    )
     st.download_button(
         "Download .docx (Word)",
         data=docx_data,
