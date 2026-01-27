@@ -565,7 +565,6 @@ def _openai_client() -> OpenAI:
     # Example:
     # OPENAI_API_KEY = "sk-..."
     OPENAI_API_KEY = "sk-your_actual_key_here"
-    key = None
     try:
         key = st.secrets.get("OPENAI_API_KEY")
     except Exception:
