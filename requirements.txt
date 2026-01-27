@@ -1,3 +1,5 @@
 streamlit
 python-docx
 pandas
+pypdf
+openai>=1.0.0
