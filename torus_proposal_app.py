@@ -1,14 +1,18 @@
+# torus_proposal_app.py
 import datetime
+import json
 import os
 from dataclasses import dataclass, asdict
 from io import BytesIO
 from typing import List, Dict
 
-import streamlit as st
 import pandas as pd
+import streamlit as st
 from docx import Document
-from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.enum.table import WD_TABLE_ALIGNMENT
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from openai import OpenAI
+from pypdf import PdfReader
 
 COMPANY_NAME = "Torus Group"
 CHECK = "✓"
@@ -39,11 +43,11 @@ class ProposalInputs:
 
     # Room counts
     num_offices: int
-    num_conference_rooms: int
+    num_conference_rooms: int  # ✅ included
     num_break_rooms: int
     num_bathrooms: int
     num_kitchens: int
-    num_locker_rooms: int
+    num_other_rooms: int
 
     # Ops
     cleaning_frequency: str
@@ -220,8 +224,8 @@ def compute_cleaning_schedule(p: ProposalInputs) -> list:
         rows.append(("VCT maintenance (buff/burnish if applicable)", "", "", CHECK))
         rows.append(("Strip & wax (as quoted/needed)", "", "", CHECK))
 
-    if int(p.num_locker_rooms or 0) > 0:
-        rows.append(("Locker rooms: clean/disinfect & mop", CHECK if d >= 3 else "", CHECK if d in (1, 2) else "", ""))
+    if int(p.num_other_rooms or 0) > 0:
+        rows.append(("Other rooms: clean/disinfect & mop", CHECK if d >= 3 else "", CHECK if d in (1, 2) else "", ""))
 
     if p.day_porter_needed == "Yes":
         rows.append(("Day porter tasks (restroom checks, spills, touch-ups)", CHECK, "", ""))
@@ -252,6 +256,9 @@ def df_to_schedule_rows(df: pd.DataFrame) -> list:
     return rows
 
 
+# =========================
+# Word helpers
+# =========================
 def add_scope_of_work_table(doc: Document, schedule_rows: list):
     title_p = doc.add_paragraph()
     title_run = title_p.add_run("SCOPE OF WORK – CLEANING SCHEDULE")
@@ -301,7 +308,7 @@ def add_cover_page(doc: Document, client_name: str, body: str):
         "Respectfully,",
         "",
         "Kara Jubilee",
-        "President",
+        "Owner",
         "Torus Cleaning Services",
     ]
     for line in paragraphs:
@@ -473,14 +480,15 @@ Contractor Authorized Signature: ___________________________   Date: ___________
 """.strip()
 
 
-# =========================
-# Word export
-# =========================
 def docx_from_agreement(text: str, schedule_rows: list, addresses: List[str], p: ProposalInputs) -> bytes:
     template_path = "Torus_Template.docx"
     doc = Document(template_path) if os.path.exists(template_path) else Document()
 
-    # Cover page injection (optional)
+    # Ensure first page header isn't blank due to "Different First Page"
+    for section in doc.sections:
+        section.different_first_page_header_footer = False
+
+    # Optional cover page
     if p.include_cover_page:
         add_cover_page(doc, p.client, p.cover_letter_body)
 
@@ -521,15 +529,169 @@ def docx_from_agreement(text: str, schedule_rows: list, addresses: List[str], p:
 
 
 # =========================
+# RFP / PWS AI Analyzer
+# =========================
+def extract_text_from_pdf(file_bytes: bytes) -> str:
+    reader = PdfReader(BytesIO(file_bytes))
+    parts = []
+    for page in reader.pages:
+        parts.append(page.extract_text() or "")
+    return "\n".join(parts).strip()
+
+
+def extract_text_from_docx(file_bytes: bytes) -> str:
+    doc = Document(BytesIO(file_bytes))
+    return "\n".join([p.text for p in doc.paragraphs]).strip()
+
+
+def extract_text_from_upload(uploaded_file) -> str:
+    name = (uploaded_file.name or "").lower()
+    data = uploaded_file.read()
+
+    if name.endswith(".pdf"):
+        return extract_text_from_pdf(data)
+    if name.endswith(".docx"):
+        return extract_text_from_docx(data)
+
+    # txt or fallback
+    try:
+        return data.decode("utf-8", errors="ignore").strip()
+    except Exception:
+        return ""
+
+
+def _openai_client() -> OpenAI:
+    # Streamlit secrets: add OPENAI_API_KEY in .streamlit/secrets.toml
+    # Example:
+    # OPENAI_API_KEY = "sk-..."
+    key = None
+    try:
+        key = st.secrets.get("OPENAI_API_KEY")
+    except Exception:
+        key = None
+    if not key:
+        raise RuntimeError("Missing OPENAI_API_KEY in Streamlit secrets.")
+    return OpenAI(api_key=key)
+
+
+def analyze_rfp_with_ai(rfp_text: str, company_profile: str = "") -> dict:
+    client = _openai_client()
+
+    schema = {
+        "name": "rfp_analysis",
+        "schema": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "opportunity_summary": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "title": {"type": "string"},
+                        "agency_or_client": {"type": "string"},
+                        "submission_deadline": {"type": "string"},
+                        "submission_method": {"type": "string"},
+                        "site_visit_required": {"type": "boolean"},
+                        "period_of_performance": {"type": "string"},
+                    },
+                    "required": [
+                        "title",
+                        "agency_or_client",
+                        "submission_deadline",
+                        "submission_method",
+                        "site_visit_required",
+                        "period_of_performance",
+                    ],
+                },
+                "compliance_checklist": {"type": "array", "items": {"type": "string"}},
+                "cleaning_plan_draft": {"type": "string"},
+                "scope_of_work_draft": {"type": "string"},
+                "schedule_rows": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {
+                            "task": {"type": "string"},
+                            "daily": {"type": "boolean"},
+                            "weekly": {"type": "boolean"},
+                            "monthly": {"type": "boolean"},
+                        },
+                        "required": ["task", "daily", "weekly", "monthly"],
+                    },
+                },
+                "add_on_suggestions": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {
+                            "name": {"type": "string"},
+                            "notes": {"type": "string"},
+                        },
+                        "required": ["name", "notes"],
+                    },
+                },
+                "clarifying_questions": {"type": "array", "items": {"type": "string"}},
+                "assumptions": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": [
+                "opportunity_summary",
+                "compliance_checklist",
+                "cleaning_plan_draft",
+                "scope_of_work_draft",
+                "schedule_rows",
+                "add_on_suggestions",
+                "clarifying_questions",
+                "assumptions",
+            ],
+        },
+    }
+
+    instructions = f"""
+You are assisting a janitorial contractor preparing an RFP/PWS response.
+Extract mandatory requirements, compliance items, and draft a cleaning plan and scope of work.
+Also propose a cleaning schedule table (daily/weekly/monthly) suitable for a janitorial SOW.
+Return ONLY JSON that matches the provided schema.
+
+Company profile/context:
+{company_profile}
+""".strip()
+
+    # Keep input bounded
+    payload = rfp_text[:120000]
+
+    resp = client.responses.create(
+        model="gpt-4.1-mini",
+        input=[
+            {"role": "system", "content": instructions},
+            {"role": "user", "content": payload},
+        ],
+        text={
+            "format": {
+                "type": "json_schema",
+                "json_schema": schema,
+            }
+        },
+        store=False,
+    )
+
+    return json.loads(resp.output_text)
+
+
+# =========================
 # UI
 # =========================
 st.set_page_config(page_title=f"{COMPANY_NAME} Agreement Builder", layout="wide")
 st.title(f"{COMPANY_NAME} — Cleaning Service Agreement Builder")
 
+# Quick template presence indicator
+st.sidebar.caption(f"Template found: {os.path.exists('proposal_template.docx')}")
+
 with st.sidebar:
     st.header("Client / Contract")
-    client = st.text_input("Client (legal name)")
-    facility_name = st.text_input("Facility/Location name")
+    client_name = st.text_input("Client (legal name)", value=st.session_state.get("client_prefill", ""))
+    facility_name = st.text_input("Facility/Location name", value=st.session_state.get("facility_prefill", ""))
 
     service_begin_date = st.text_input("Service begin date")
     service_end_date = st.text_input("Service end date")
@@ -555,6 +717,7 @@ with st.sidebar:
     st.header("Cover Page")
     include_cover_page = st.checkbox("Include cover page", value=True)
 
+
 c1, c2, c3 = st.columns(3)
 
 with c1:
@@ -566,11 +729,11 @@ with c1:
 with c2:
     st.subheader("Room counts")
     num_offices = st.number_input("Offices", min_value=0, step=1, value=0)
-    num_conference_rooms = st.number_input("Conference rooms", min_value=0, step=1, value=0)
+    num_conference_rooms = st.number_input("Conference rooms", min_value=0, step=1, value=0)  # ✅ added/kept
     num_break_rooms = st.number_input("Break rooms", min_value=0, step=1, value=0)
     num_bathrooms = st.number_input("Bathrooms", min_value=0, step=1, value=0)
     num_kitchens = st.number_input("Kitchens", min_value=0, step=1, value=0)
-    num_locker_rooms = st.number_input("Locker rooms", min_value=0, step=1, value=0)
+    num_other_rooms = st.number_input("Other rooms", min_value=0, step=1, value=0)
 
 with c3:
     st.subheader("Pricing")
@@ -622,22 +785,28 @@ with c3:
     cover_letter_body = st.text_area(
         "Cover Letter Body",
         height=220,
+        value=st.session_state.get("cover_letter_body_prefill", ""),
         placeholder="This text will appear on the cover page introduction letter..."
     )
 
     st.subheader("Cleaning Plan (optional)")
     cleaning_plan = st.text_area(
         "Cleaning Plan",
-        height=140,
+        height=160,
+        value=st.session_state.get("cleaning_plan_prefill", ""),
         placeholder="Add any special instructions, priorities, staffing approach, or site-specific plan..."
     )
 
     st.subheader("Notes")
-    notes = st.text_area("Notes (optional)", height=120)
+    notes = st.text_area(
+        "Notes (optional)",
+        height=140,
+        value=st.session_state.get("notes_prefill", "")
+    )
 
 st.divider()
 
-# Service addresses
+# Service addresses (multi)
 st.subheader("Service Address(es)")
 st.caption("Add one or more addresses for this agreement.")
 
@@ -710,9 +879,9 @@ compensation_override = 0.0
 if compensation_mode == "Override":
     compensation_override = st.number_input("Compensation override ($ per month)", min_value=0.0, step=50.0, value=0.0)
 
-# Build inputs
+# Build ProposalInputs
 p = ProposalInputs(
-    client=client.strip(),
+    client=client_name.strip(),
     facility_name=facility_name.strip(),
     service_begin_date=service_begin_date.strip(),
     service_end_date=service_end_date.strip(),
@@ -720,39 +889,51 @@ p = ProposalInputs(
     days_per_week=int(days_per_week),
     cleaning_times=cleaning_times.strip(),
     net_terms=int(net_terms),
+
     sales_tax_percent=float(sales_tax_percent),
+
     space_type=space_type.strip(),
     square_footage=int(square_footage),
     floor_types=floor_types.strip(),
+
     num_offices=int(num_offices),
     num_conference_rooms=int(num_conference_rooms),
     num_break_rooms=int(num_break_rooms),
     num_bathrooms=int(num_bathrooms),
     num_kitchens=int(num_kitchens),
-    num_locker_rooms=int(num_locker_rooms),
+    num_other_rooms=int(num_other_rooms),
+
     cleaning_frequency=cleaning_frequency.strip(),
     day_porter_needed=day_porter_needed,
     trash_pickup=trash_pickup.strip(),
     restocking_needed=restocking_needed,
+
     hand_soap=hand_soap,
     paper_towels=paper_towels,
     toilet_paper=toilet_paper,
+
     pricing_mode=pricing_mode,
     monthly_fixed_price=float(monthly_fixed_price),
     rate_per_sqft=float(rate_per_sqft),
     rate_per_visit=float(rate_per_visit),
     visits_per_week=float(visits_per_week),
     visits_per_month=int(visits_per_month),
+
     deep_clean_option=deep_clean_option,
     deep_clean_price=float(deep_clean_price),
     deep_clean_includes=deep_clean_includes,
+
     additional_services=st.session_state.addons,
     include_addons_in_total=include_addons_in_total,
+
     compensation_mode=compensation_mode,
     compensation_override=float(compensation_override),
+
     cleaning_plan=cleaning_plan.strip(),
+
     include_cover_page=include_cover_page,
     cover_letter_body=cover_letter_body.strip(),
+
     notes=notes.strip(),
 )
 
@@ -765,9 +946,12 @@ t2.metric("Sales tax (monthly)", money(totals["monthly_tax"]))
 t3.metric("Monthly total (with tax)", money(totals["monthly_total_with_tax"]))
 t4.metric("Compensation (monthly)", money(totals["compensation_monthly"]))
 
-# Schedule tuning
+# =========================
+# Scope of Work — Schedule Tuning
+# =========================
 st.divider()
 st.subheader("Scope of Work — Schedule Tuning")
+st.caption("Edit tasks/frequencies here. The Word table will match what you set.")
 
 default_rows = compute_cleaning_schedule(p)
 default_df = schedule_rows_to_df(default_rows)
@@ -794,7 +978,108 @@ edited_df = st.data_editor(
 st.session_state.schedule_df = edited_df
 tuned_schedule_rows = df_to_schedule_rows(edited_df)
 
+# =========================
+# RFP / PWS Analyzer (AI)
+# =========================
+st.divider()
+st.subheader("RFP / PWS Analyzer (AI)")
+st.caption("Upload an RFP/PWS to extract requirements and draft a response you can apply into this proposal.")
+
+rfp_files = st.file_uploader(
+    "Upload RFP/PWS files (PDF, DOCX, TXT)",
+    type=["pdf", "docx", "txt"],
+    accept_multiple_files=True
+)
+
+company_profile = st.text_area(
+    "Optional: company profile context",
+    height=120,
+    placeholder="Example: Licensed/insured; background-checked staff; QA inspections; SDVOSB; etc."
+)
+
+col_an1, col_an2 = st.columns([1, 2])
+with col_an1:
+    run_analysis = st.button("Analyze RFP/PWS with AI")
+with col_an2:
+    if st.button("Clear analysis / prefills"):
+        for k in ["rfp_analysis", "cleaning_plan_prefill", "notes_prefill", "cover_letter_body_prefill"]:
+            if k in st.session_state:
+                del st.session_state[k]
+        st.success("Cleared.")
+        st.rerun()
+
+if run_analysis:
+    if not rfp_files:
+        st.error("Please upload at least one RFP/PWS file.")
+    else:
+        combined = []
+        for f in rfp_files:
+            text = extract_text_from_upload(f)
+            if text:
+                combined.append(f"\n\n===== {f.name} =====\n{text}")
+        rfp_text = "\n".join(combined).strip()
+
+        if not rfp_text:
+            st.error("Could not extract text from the uploads (PDF may be scanned).")
+        else:
+            try:
+                with st.spinner("Analyzing with AI..."):
+                    analysis = analyze_rfp_with_ai(rfp_text, company_profile=company_profile)
+                st.session_state["rfp_analysis"] = analysis
+                st.success("Analysis complete.")
+            except Exception as e:
+                st.error(f"AI analysis failed: {e}")
+
+analysis = st.session_state.get("rfp_analysis")
+if analysis:
+    st.subheader("Opportunity Summary")
+    st.json(analysis["opportunity_summary"])
+
+    st.subheader("Compliance Checklist")
+    st.write("\n".join([f"- {x}" for x in analysis["compliance_checklist"]]) or "(none)")
+
+    st.subheader("Drafts")
+    st.text_area("AI Cleaning Plan draft", analysis["cleaning_plan_draft"], height=180)
+    st.text_area("AI Scope of Work draft", analysis["scope_of_work_draft"], height=180)
+
+    st.subheader("Clarifying Questions")
+    st.write("\n".join([f"- {x}" for x in analysis["clarifying_questions"]]) or "(none)")
+
+    st.subheader("Assumptions")
+    st.write("\n".join([f"- {x}" for x in analysis["assumptions"]]) or "(none)")
+
+    st.subheader("Add-on Suggestions")
+    for s in analysis["add_on_suggestions"]:
+        st.write(f"- **{s['name']}** — {s['notes']}")
+
+    if st.button("Apply AI drafts to proposal fields + schedule"):
+        # Prefill text fields
+        st.session_state["cleaning_plan_prefill"] = analysis.get("cleaning_plan_draft", "")
+        # Put scope draft into Notes by default (you can edit after)
+        st.session_state["notes_prefill"] = analysis.get("scope_of_work_draft", "")
+
+        # Optional: if cover letter body is empty, use a short AI summary (or leave blank)
+        if not st.session_state.get("cover_letter_body_prefill"):
+            # Keep it conservative: only populate if there's something meaningful
+            st.session_state["cover_letter_body_prefill"] = (
+                "Thank you for the opportunity to submit our proposal. "
+                "Please find our Cleaning Service Agreement, scope of work, and cleaning schedule enclosed. "
+                "We look forward to supporting your facility with consistent, high-quality service."
+            )
+
+        # Apply schedule
+        ai_rows = []
+        for r in analysis.get("schedule_rows", []):
+            ai_rows.append((r.get("task", ""), bool(r.get("daily", False)), bool(r.get("weekly", False)), bool(r.get("monthly", False))))
+        if ai_rows:
+            st.session_state["schedule_df"] = pd.DataFrame(ai_rows, columns=["Task", "Daily", "Weekly", "Monthly"])
+
+        st.success("Applied. Scroll up to see updated fields and schedule.")
+        st.rerun()
+
+# =========================
 # Preview + downloads
+# =========================
 st.divider()
 st.subheader("Preview")
 agreement_text = build_agreement_text(p)
@@ -827,7 +1112,7 @@ with colB:
 with colC:
     st.download_button(
         "Download inputs (.json)",
-        data=str(asdict(p)).encode("utf-8"),
+        data=json.dumps(asdict(p), indent=2).encode("utf-8"),
         file_name=f"TorusGroup_Agreement_Inputs_{datetime.date.today().isoformat()}.json",
         mime="application/json",
     )
