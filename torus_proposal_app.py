@@ -130,8 +130,26 @@ def extract_text(uploaded_file) -> str:
 # =========================
 # WORD HELPERS
 # =========================
+def add_bullet_paragraph(doc: Document, text: str):
+    """
+    Adds a bullet paragraph. Uses a bullet style if it exists in the template,
+    otherwise falls back to a manual bullet so it never crashes.
+    """
+    bullet_style_candidates = ("List Bullet", "List Paragraph", "Bullet List")
+
+    for style_name in bullet_style_candidates:
+        try:
+            doc.add_paragraph(text, style=style_name)
+            return
+        except KeyError:
+            continue
+
+    # Template has no bullet style → safe fallback
+    doc.add_paragraph(f"• {text}")
+
+
 def add_cover_page(doc: Document, client: str, body: str):
-    # Letterhead/header should already be in Torus_template.docx
+    # Letterhead/header should already be in proposal_template.docx
     doc.add_paragraph(client)
     doc.add_paragraph("")
     doc.add_paragraph("Attn: ______________________")
@@ -178,7 +196,7 @@ def add_scope_table(doc: Document, rows: List[tuple]):
 
 
 def build_doc(p: ProposalInputs, schedule_rows: List[tuple]) -> bytes:
-    template_path = "Torus_Template.docx"
+    template_path = "proposal_template.docx"
     doc = Document(template_path) if os.path.exists(template_path) else Document()
 
     # Ensure headers show on first page even if template has "Different First Page"
@@ -202,7 +220,8 @@ def build_doc(p: ProposalInputs, schedule_rows: List[tuple]) -> bytes:
     for a in (p.service_addresses or []):
         a2 = (a or "").strip()
         if a2:
-            doc.add_paragraph(a2, style="List Bullet")
+            # ✅ FIX: bullet helper prevents KeyError if template lacks 'List Bullet'
+            add_bullet_paragraph(doc, a2)
 
     doc.add_paragraph("")
     doc.add_paragraph(
@@ -259,70 +278,75 @@ def build_doc(p: ProposalInputs, schedule_rows: List[tuple]) -> bytes:
 st.set_page_config(layout="wide")
 st.title("Torus Group – Cleaning Proposal Builder")
 
-# Proof line (leave it until everything is stable)
-st.sidebar.caption(f"OpenAI key loaded: {bool(st.secrets.get('OPENAI_API_KEY'))}")
-st.sidebar.caption(f"Template found: {os.path.exists('Torus_Template.docx')}")
-
 # Persist “apply AI” results across reruns
 st.session_state.setdefault("cleaning_plan_prefill", "")
 st.session_state.setdefault("schedule_rows_prefill", None)
 
-# Basic fields
-client = st.text_input("Client")
-facility = st.text_input("Facility name")
+with st.sidebar:
+    st.header("Proposal Inputs")
+    st.caption(f"OpenAI key loaded: {bool(st.secrets.get('OPENAI_API_KEY'))}")
+    st.caption(f"Template found: {os.path.exists('proposal_template.docx')}")
 
-c1, c2 = st.columns(2)
-with c1:
-    start = st.text_input("Service begin date")
+    client = st.text_input("Client")
+    facility = st.text_input("Facility name")
+
+    service_begin_date = st.text_input("Service begin date")
+    service_end_date = st.text_input("Service end date")
+
     days = st.number_input("Days per week", min_value=1, value=5)
-with c2:
-    end = st.text_input("Service end date")
-    times = st.text_input("Cleaning times")
+    times = st.text_input("Cleaning times (e.g., 6 PM – 10 PM)")
 
-addresses = st.text_area("Service addresses (one per line)").splitlines()
+    st.subheader("Service Addresses")
+    addresses = st.text_area("One address per line").splitlines()
 
-# Room counts (includes conference rooms)
-st.subheader("Room Counts")
-offices = st.number_input("Offices", min_value=0)
-conference = st.number_input("Conference rooms", min_value=0)
-breaks = st.number_input("Break rooms", min_value=0)
-baths = st.number_input("Bathrooms", min_value=0)
+    st.subheader("Room Counts")
+    offices = st.number_input("Offices", min_value=0)
+    conference = st.number_input("Conference rooms", min_value=0)
+    breaks = st.number_input("Break rooms", min_value=0)
+    baths = st.number_input("Bathrooms", min_value=0)
 
-# Consumables
-st.subheader("Consumables")
-soap = st.selectbox("Hand soap", ["Contractor", "Client"])
-towels = st.selectbox("Paper towels", ["Contractor", "Client"])
-tp = st.selectbox("Toilet paper", ["Contractor", "Client"])
+    st.subheader("Consumables")
+    soap = st.selectbox("Hand soap", ["Contractor", "Client"])
+    towels = st.selectbox("Paper towels", ["Contractor", "Client"])
+    tp = st.selectbox("Toilet paper", ["Contractor", "Client"])
 
-# Cover page
-st.subheader("Cover Page")
-include_cover = st.checkbox("Include cover page", True)
-cover_body = st.text_area("Cover letter body")
+    st.subheader("Cover Page")
+    include_cover = st.checkbox("Include cover page", True)
+    cover_body = st.text_area("Cover letter body")
 
-# Cleaning plan (prefilled if AI applied)
 st.subheader("Cleaning Plan")
 cleaning_plan = st.text_area("Cleaning Plan (optional)", value=st.session_state["cleaning_plan_prefill"])
 
-# Notes
 st.subheader("Notes")
 notes = st.text_area("Notes")
 
-# Schedule editor (prefilled if AI applied)
+# Schedule editor (dynamic; you can add/edit/remove tasks)
 st.subheader("Cleaning Schedule")
+st.caption("Add, remove, or edit tasks below. Use the last row to add new cleaning tasks.")
 
 default_rows = [
-    ("Empty trash", True, False, False),
-    ("Clean restrooms", True, False, False),
-    ("Vacuum floors", True, False, False),
-    ("Dust surfaces", False, True, False),
-    ("Deep clean tasks (as scheduled)", False, False, True),
+    ("Empty trash & replace liners", True, False, False),
+    ("Clean & disinfect restrooms", True, False, False),
+    ("Vacuum carpet / sweep hard floors", True, False, False),
+    ("Wipe high-touch points (handles, switches)", True, False, False),
+    ("Dust reachable surfaces", False, True, False),
+    ("Mop hard floors (as applicable)", False, True, False),
+    ("Clean break room counters & sink", False, True, False),
+    ("Glass/mirrors touch-up", False, True, False),
+    ("High dusting (vents/ledges)", False, False, True),
+    ("Detail baseboards/edges", False, False, True),
 ]
 
 prefill_rows = st.session_state["schedule_rows_prefill"] or default_rows
 df = pd.DataFrame(prefill_rows, columns=["Task", "Daily", "Weekly", "Monthly"])
 edited = st.data_editor(df, num_rows="dynamic", use_container_width=True)
 
-schedule_rows = [(r.Task, r.Daily, r.Weekly, r.Monthly) for r in edited.itertuples()]
+# Convert edited schedule to tuples; ignore blank tasks
+schedule_rows = [
+    (r.Task, r.Daily, r.Weekly, r.Monthly)
+    for r in edited.itertuples()
+    if str(r.Task).strip()
+]
 
 # =========================
 # AI ANALYZER
@@ -345,20 +369,16 @@ with colB:
         st.success("Cleared.")
         st.rerun()
 
-from openai import APIStatusError
-
-# ...
-
 if run_ai and uploads:
     try:
         full_text = "\n\n".join(extract_text(f) for f in uploads)
-        with st.spinner("Analyzing…"):
-            result = analyze_rfp_with_ai(full_text)
-        st.session_state["ai"] = result
-        st.success("Analysis complete.")
-    except APIStatusError as e:
-        st.error(f"OpenAI API error {e.status_code}: {e.message}")
-        st.code(getattr(e, "response", None).text if getattr(e, "response", None) else "No response body")
+        if not full_text.strip():
+            st.error("Could not extract any text from the upload(s). If PDF is scanned, OCR is needed.")
+        else:
+            with st.spinner("Analyzing…"):
+                result = analyze_rfp_with_ai(full_text)
+            st.session_state["ai"] = result
+            st.success("Analysis complete.")
     except Exception as e:
         st.exception(e)
 
@@ -376,7 +396,7 @@ if "ai" in st.session_state:
     if st.button("Apply AI to proposal"):
         st.session_state["cleaning_plan_prefill"] = ai.get("cleaning_plan_draft", "")
         st.session_state["schedule_rows_prefill"] = [
-            (r["task"], bool(r["daily"]), bool(r["weekly"]), bool(r["monthly"]))
+            (r.get("task", ""), bool(r.get("daily", False)), bool(r.get("weekly", False)), bool(r.get("monthly", False)))
             for r in ai.get("schedule_rows", [])
             if (r.get("task") or "").strip()
         ] or None
@@ -389,8 +409,8 @@ if "ai" in st.session_state:
 p = ProposalInputs(
     client=client,
     facility_name=facility,
-    service_begin_date=start,
-    service_end_date=end,
+    service_begin_date=service_begin_date,
+    service_end_date=service_end_date,
     service_addresses=addresses,
     days_per_week=int(days),
     cleaning_times=times,
@@ -422,7 +442,6 @@ st.download_button(
     mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
 )
 
-# Optional: Download inputs JSON (handy for recordkeeping)
 st.download_button(
     "Download Inputs (JSON)",
     data=json.dumps(asdict(p), indent=2).encode("utf-8"),
