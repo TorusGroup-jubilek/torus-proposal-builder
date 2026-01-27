@@ -5,7 +5,7 @@
 # ✅ Optional consumables (only show if selected)
 # ✅ Standard cover letter (auto-fills Client Name) + toggle + editable
 # ✅ Dynamic cleaning schedule table
-# ✅ Word template support (proposal_template.docx)
+# ✅ Word template support (Torus_Template.docx)
 # ✅ Bullet-style fallback (prevents KeyError on missing bullet styles)
 
 import os
@@ -212,7 +212,7 @@ def add_scope_table(doc: Document, rows: List[tuple]):
 
 
 def build_doc(p: ProposalInputs, schedule_rows: List[tuple]) -> bytes:
-    template_path = "proposal_template.docx"
+    template_path = "Torus_Template.docx"
     doc = Document(template_path) if os.path.exists(template_path) else Document()
 
     for s in doc.sections:
@@ -452,7 +452,7 @@ with st.form("proposal_form", clear_on_submit=False):
     with col2:
         generate_btn = st.form_submit_button("Generate Proposal")
     with col3:
-        st.caption(f"Template found: {os.path.exists('proposal_template.docx')}")
+        st.caption(f"Template found: {os.path.exists('Torus_Template.docx')}")
 
 # Post-form: update session state objects
 st.session_state["schedule_df"] = schedule_df
