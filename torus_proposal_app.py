@@ -689,6 +689,8 @@ Company profile/context:
 st.set_page_config(page_title=f"{COMPANY_NAME} Agreement Builder", layout="wide")
 st.title(f"{COMPANY_NAME} — Cleaning Service Agreement Builder")
 
+st.sidebar.caption(f"OpenAI key loaded: {bool(st.secrets.get('OPENAI_API_KEY', ''))}")
+
 # Quick template indicator
 st.sidebar.caption(f"Template found: {os.path.exists('proposal_template.docx')}")
 
