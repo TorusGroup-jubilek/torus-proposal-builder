@@ -1,10 +1,19 @@
 # torus_proposal_app.py
+# Torus Group — Cleaning Service Agreement Builder + Optional Cover Page + AI RFP/PWS Analyzer
+#
+# ✅ Template support (proposal_template.docx)
+# ✅ Optional cover page toggle
+# ✅ Multi-address bullets in Word
+# ✅ Dynamic Scope of Work schedule table (editable)
+# ✅ Optional Cleaning Plan section
+# ✅ AI RFP/PWS upload + analysis + “Apply to Proposal” (requires OPENAI_API_KEY in Streamlit secrets)
+
 import datetime
 import json
 import os
 from dataclasses import dataclass, asdict
 from io import BytesIO
-from typing import List, Dict
+from typing import List, Dict, Any
 
 import pandas as pd
 import streamlit as st
@@ -43,11 +52,11 @@ class ProposalInputs:
 
     # Room counts
     num_offices: int
-    num_conference_rooms: int  # ✅ included
+    num_conference_rooms: int
     num_break_rooms: int
     num_bathrooms: int
     num_kitchens: int
-    num_other_rooms: int
+    num_locker_rooms: int
 
     # Ops
     cleaning_frequency: str
@@ -184,7 +193,7 @@ def build_totals(p: ProposalInputs) -> dict:
 
 
 # =========================
-# Dynamic schedule + tuning
+# Schedule: recommended rows + editable table
 # =========================
 def compute_cleaning_schedule(p: ProposalInputs) -> list:
     d = int(p.days_per_week or 0)
@@ -224,8 +233,8 @@ def compute_cleaning_schedule(p: ProposalInputs) -> list:
         rows.append(("VCT maintenance (buff/burnish if applicable)", "", "", CHECK))
         rows.append(("Strip & wax (as quoted/needed)", "", "", CHECK))
 
-    if int(p.num_other_rooms or 0) > 0:
-        rows.append(("Other rooms: clean/disinfect & mop", CHECK if d >= 3 else "", CHECK if d in (1, 2) else "", ""))
+    if int(p.num_locker_rooms or 0) > 0:
+        rows.append(("Locker rooms: clean/disinfect & mop", CHECK if d >= 3 else "", CHECK if d in (1, 2) else "", ""))
 
     if p.day_porter_needed == "Yes":
         rows.append(("Day porter tasks (restroom checks, spills, touch-ups)", CHECK, "", ""))
@@ -239,7 +248,7 @@ def compute_cleaning_schedule(p: ProposalInputs) -> list:
 def schedule_rows_to_df(rows: list) -> pd.DataFrame:
     return pd.DataFrame(
         [(t, d == CHECK, w == CHECK, m == CHECK) for (t, d, w, m) in rows],
-        columns=["Task", "Daily", "Weekly", "Monthly"]
+        columns=["Task", "Daily", "Weekly", "Monthly"],
     )
 
 
@@ -294,6 +303,7 @@ def add_address_bullets(doc: Document, addresses: List[str]):
 
 
 def add_cover_page(doc: Document, client_name: str, body: str):
+    # Letterhead style should be in the template header. This function adds the cover letter content.
     paragraphs = [
         client_name,
         "",
@@ -484,7 +494,7 @@ def docx_from_agreement(text: str, schedule_rows: list, addresses: List[str], p:
     template_path = "Torus_Template.docx"
     doc = Document(template_path) if os.path.exists(template_path) else Document()
 
-    # Ensure first page header isn't blank due to "Different First Page"
+    # Prevent blank header on cover page if template has "Different First Page"
     for section in doc.sections:
         section.different_first_page_header_footer = False
 
@@ -492,6 +502,7 @@ def docx_from_agreement(text: str, schedule_rows: list, addresses: List[str], p:
     if p.include_cover_page:
         add_cover_page(doc, p.client, p.cover_letter_body)
 
+    # Write agreement content
     for line in text.splitlines():
         s = line.strip()
 
@@ -560,23 +571,22 @@ def extract_text_from_upload(uploaded_file) -> str:
         return ""
 
 
-def _openai_client() -> OpenAI:
-    # Streamlit secrets: add OPENAI_API_KEY in .streamlit/secrets.toml
-    # Example:
-    # OPENAI_API_KEY = "sk-..."
-    OPENAI_API_KEY = "sk-your_actual_key_here"
+def get_openai_client() -> OpenAI:
+    key = None
     try:
         key = st.secrets.get("OPENAI_API_KEY")
     except Exception:
         key = None
+
     if not key:
         raise RuntimeError("Missing OPENAI_API_KEY in Streamlit secrets.")
     return OpenAI(api_key=key)
 
 
-def analyze_rfp_with_ai(rfp_text: str, company_profile: str = "") -> dict:
-    client = _openai_client()
+def analyze_rfp_with_ai(rfp_text: str, company_profile: str = "") -> Dict[str, Any]:
+    client = get_openai_client()
 
+    # JSON schema for consistent output
     schema = {
         "name": "rfp_analysis",
         "schema": {
@@ -658,8 +668,7 @@ Company profile/context:
 {company_profile}
 """.strip()
 
-    # Keep input bounded
-    payload = rfp_text[:120000]
+    payload = rfp_text[:120000]  # keep bounded
 
     resp = client.responses.create(
         model="gpt-4.1-mini",
@@ -667,12 +676,7 @@ Company profile/context:
             {"role": "system", "content": instructions},
             {"role": "user", "content": payload},
         ],
-        text={
-            "format": {
-                "type": "json_schema",
-                "json_schema": schema,
-            }
-        },
+        text={"format": {"type": "json_schema", "json_schema": schema}},
         store=False,
     )
 
@@ -680,18 +684,23 @@ Company profile/context:
 
 
 # =========================
-# UI
+# Streamlit UI
 # =========================
 st.set_page_config(page_title=f"{COMPANY_NAME} Agreement Builder", layout="wide")
 st.title(f"{COMPANY_NAME} — Cleaning Service Agreement Builder")
 
-# Quick template presence indicator
+# Quick template indicator
 st.sidebar.caption(f"Template found: {os.path.exists('proposal_template.docx')}")
+
+# Session defaults for prefills
+st.session_state.setdefault("cover_letter_body_prefill", "")
+st.session_state.setdefault("cleaning_plan_prefill", "")
+st.session_state.setdefault("notes_prefill", "")
 
 with st.sidebar:
     st.header("Client / Contract")
-    client_name = st.text_input("Client (legal name)", value=st.session_state.get("client_prefill", ""))
-    facility_name = st.text_input("Facility/Location name", value=st.session_state.get("facility_prefill", ""))
+    client_name = st.text_input("Client (legal name)", value="")
+    facility_name = st.text_input("Facility/Location name", value="")
 
     service_begin_date = st.text_input("Service begin date")
     service_end_date = st.text_input("Service end date")
@@ -717,23 +726,25 @@ with st.sidebar:
     st.header("Cover Page")
     include_cover_page = st.checkbox("Include cover page", value=True)
 
-
 c1, c2, c3 = st.columns(3)
 
 with c1:
     st.subheader("Facility details")
     space_type = st.text_input("Type of space (Office/Medical/etc.)", value="Office")
     square_footage = st.number_input("Square footage", min_value=0, step=100, value=0)
-    floor_types = st.text_area("Floor types (optional)", placeholder="Carpet 7,600 sqft; VCT 30,000 sqft; Epoxy 50,000 sqft")
+    floor_types = st.text_area(
+        "Floor types (optional)",
+        placeholder="Carpet 7,600 sqft; VCT 30,000 sqft; Epoxy 50,000 sqft"
+    )
 
 with c2:
     st.subheader("Room counts")
     num_offices = st.number_input("Offices", min_value=0, step=1, value=0)
-    num_conference_rooms = st.number_input("Conference rooms", min_value=0, step=1, value=0)  # ✅ added/kept
+    num_conference_rooms = st.number_input("Conference rooms", min_value=0, step=1, value=0)
     num_break_rooms = st.number_input("Break rooms", min_value=0, step=1, value=0)
     num_bathrooms = st.number_input("Bathrooms", min_value=0, step=1, value=0)
     num_kitchens = st.number_input("Kitchens", min_value=0, step=1, value=0)
-    num_other_rooms = st.number_input("Other rooms", min_value=0, step=1, value=0)
+    num_locker_rooms = st.number_input("Locker rooms", min_value=0, step=1, value=0)
 
 with c3:
     st.subheader("Pricing")
@@ -748,7 +759,13 @@ with c3:
     if pricing_mode == "Monthly Fixed":
         monthly_fixed_price = st.number_input("Monthly fixed price ($)", min_value=0.0, step=50.0, value=0.0)
     elif pricing_mode == "Per Sq Ft":
-        rate_per_sqft = st.number_input("Rate per sq ft ($/sqft)", min_value=0.0, step=0.001, format="%.4f", value=0.0000)
+        rate_per_sqft = st.number_input(
+            "Rate per sq ft ($/sqft)",
+            min_value=0.0,
+            step=0.001,
+            format="%.4f",
+            value=0.0000
+        )
         st.caption("Calculates monthly base: rate × square footage.")
     else:
         rate_per_visit = st.number_input("Rate per visit ($/visit)", min_value=0.0, step=25.0, value=0.0)
@@ -806,7 +823,7 @@ with c3:
 
 st.divider()
 
-# Service addresses (multi)
+# Multi-address UI
 st.subheader("Service Address(es)")
 st.caption("Add one or more addresses for this agreement.")
 
@@ -833,7 +850,7 @@ if st.button("Add another address"):
 
 st.divider()
 
-# Add-ons
+# Add-ons UI
 st.subheader("Additional services (add-ons)")
 st.caption("Add line items (example: Day porter hours, Event cleanup, Carpet extraction add-on).")
 
@@ -872,7 +889,7 @@ with cbtn2:
 
 st.divider()
 
-# Compensation
+# Compensation UI
 st.subheader("Compensation")
 compensation_mode = st.selectbox("Compensation mode", ["Auto (calculated)", "Override"])
 compensation_override = 0.0
@@ -889,56 +906,44 @@ p = ProposalInputs(
     days_per_week=int(days_per_week),
     cleaning_times=cleaning_times.strip(),
     net_terms=int(net_terms),
-
     sales_tax_percent=float(sales_tax_percent),
-
     space_type=space_type.strip(),
     square_footage=int(square_footage),
     floor_types=floor_types.strip(),
-
     num_offices=int(num_offices),
     num_conference_rooms=int(num_conference_rooms),
     num_break_rooms=int(num_break_rooms),
     num_bathrooms=int(num_bathrooms),
     num_kitchens=int(num_kitchens),
-    num_other_rooms=int(num_other_rooms),
-
+    num_locker_rooms=int(num_locker_rooms),
     cleaning_frequency=cleaning_frequency.strip(),
     day_porter_needed=day_porter_needed,
     trash_pickup=trash_pickup.strip(),
     restocking_needed=restocking_needed,
-
     hand_soap=hand_soap,
     paper_towels=paper_towels,
     toilet_paper=toilet_paper,
-
     pricing_mode=pricing_mode,
     monthly_fixed_price=float(monthly_fixed_price),
     rate_per_sqft=float(rate_per_sqft),
     rate_per_visit=float(rate_per_visit),
     visits_per_week=float(visits_per_week),
     visits_per_month=int(visits_per_month),
-
     deep_clean_option=deep_clean_option,
     deep_clean_price=float(deep_clean_price),
     deep_clean_includes=deep_clean_includes,
-
     additional_services=st.session_state.addons,
     include_addons_in_total=include_addons_in_total,
-
     compensation_mode=compensation_mode,
     compensation_override=float(compensation_override),
-
     cleaning_plan=cleaning_plan.strip(),
-
     include_cover_page=include_cover_page,
     cover_letter_body=cover_letter_body.strip(),
-
     notes=notes.strip(),
 )
 
+# Totals display
 totals = build_totals(p)
-
 st.subheader("Calculated totals")
 t1, t2, t3, t4 = st.columns(4)
 t1.metric("Monthly subtotal (pre-tax)", money(totals["monthly_subtotal"]))
@@ -946,12 +951,10 @@ t2.metric("Sales tax (monthly)", money(totals["monthly_tax"]))
 t3.metric("Monthly total (with tax)", money(totals["monthly_total_with_tax"]))
 t4.metric("Compensation (monthly)", money(totals["compensation_monthly"]))
 
-# =========================
-# Scope of Work — Schedule Tuning
-# =========================
+# Schedule tuning
 st.divider()
 st.subheader("Scope of Work — Schedule Tuning")
-st.caption("Edit tasks/frequencies here. The Word table will match what you set.")
+st.caption("Edit tasks/frequencies here. The Word schedule table will match what you set.")
 
 default_rows = compute_cleaning_schedule(p)
 default_df = schedule_rows_to_df(default_rows)
@@ -974,7 +977,6 @@ edited_df = st.data_editor(
         "Monthly": st.column_config.CheckboxColumn("Monthly"),
     },
 )
-
 st.session_state.schedule_df = edited_df
 tuned_schedule_rows = df_to_schedule_rows(edited_df)
 
@@ -1053,24 +1055,22 @@ if analysis:
         st.write(f"- **{s['name']}** — {s['notes']}")
 
     if st.button("Apply AI drafts to proposal fields + schedule"):
-        # Prefill text fields
         st.session_state["cleaning_plan_prefill"] = analysis.get("cleaning_plan_draft", "")
-        # Put scope draft into Notes by default (you can edit after)
         st.session_state["notes_prefill"] = analysis.get("scope_of_work_draft", "")
 
-        # Optional: if cover letter body is empty, use a short AI summary (or leave blank)
         if not st.session_state.get("cover_letter_body_prefill"):
-            # Keep it conservative: only populate if there's something meaningful
             st.session_state["cover_letter_body_prefill"] = (
                 "Thank you for the opportunity to submit our proposal. "
                 "Please find our Cleaning Service Agreement, scope of work, and cleaning schedule enclosed. "
                 "We look forward to supporting your facility with consistent, high-quality service."
             )
 
-        # Apply schedule
         ai_rows = []
         for r in analysis.get("schedule_rows", []):
-            ai_rows.append((r.get("task", ""), bool(r.get("daily", False)), bool(r.get("weekly", False)), bool(r.get("monthly", False))))
+            ai_rows.append(
+                (r.get("task", ""), bool(r.get("daily", False)), bool(r.get("weekly", False)), bool(r.get("monthly", False)))
+            )
+
         if ai_rows:
             st.session_state["schedule_df"] = pd.DataFrame(ai_rows, columns=["Task", "Daily", "Weekly", "Monthly"])
 
