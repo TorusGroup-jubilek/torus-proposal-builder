@@ -1,13 +1,3 @@
-# torus_proposal_app.py
-# Torus Group – Cleaning Service Agreement Builder with AI RFP/PWS Analyzer (Streamlit Cloud-safe)
-# SINGLE FORM STYLE (no sidebar), with:
-# ✅ Dynamic “Additional Room Types” (name + count)
-# ✅ Optional consumables (only show if selected)
-# ✅ Standard cover letter (auto-fills Client Name) + toggle + editable
-# ✅ Dynamic cleaning schedule table
-# ✅ Word template support (Torus_Template.docx)
-# ✅ Bullet-style fallback (prevents KeyError on missing bullet styles)
-
 import os
 import json
 import datetime
@@ -24,7 +14,6 @@ from pypdf import PdfReader
 from openai import OpenAI
 
 CHECK = "✓"
-COMPANY_NAME = "Torus Group"
 
 
 # =========================
@@ -49,7 +38,7 @@ class ProposalInputs:
     # Custom room types
     custom_rooms: List[Dict[str, int]]
 
-    # Consumables (optional)
+    # Consumables (optional: None means do not print)
     hand_soap: Optional[str]
     paper_towels: Optional[str]
     toilet_paper: Optional[str]
@@ -62,6 +51,24 @@ class ProposalInputs:
     cleaning_plan: str
     notes: str
 
+    # Payment (optional)
+    compensation_amount: Optional[float]
+    compensation_basis: str  # "monthly", "annual", "per visit"
+    net_terms_days: Optional[int]
+    late_interest_percent: Optional[float]
+    include_compensation_section: bool
+
+    # Added contract sections toggles
+    include_employee_conduct: bool
+    include_on_site_storage: bool
+    include_modification: bool
+    include_access: bool
+    include_cancellation: bool
+
+    # Signature (contractor fixed)
+    contractor_printed_name: str
+    contractor_title: str
+
 
 # =========================
 # COVER LETTER DEFAULT
@@ -70,9 +77,9 @@ def default_cover_letter(client_name: str) -> str:
     cn = client_name.strip() or "[Client Name]"
     return f"""Hello {cn},
 
-I want to personally take the opportunity to say thank you for considering Torus Cleaning as an option for your commercial cleaning needs. We pride ourselves as a core value based business and seek to partner with those that align with the culture we continue to build. Our capable crews of background checked staff are constantly growing to accommodate the needs of our customers. 
+I want to personally take the opportunity to say thank you for considering Torus Cleaning as an option for your commercial cleaning needs. We pride ourselves as a core value based business and seek to partner with those that align with the culture we continue to build. Our capable crews of background checked staff are constantly growing to accommodate the needs of our customers.
 
-As the President, I have over 20 years of project and program management in both the military and corporate settings. Believe when I tell you I am no stranger to long, busy days that carry over to the next. We strive to deliver a professional, trustworthy service that affords our customers the peace of mind to know their spaces are well maintained. 
+As the President, I have over 20 years of project and program management in both the military and corporate settings. Believe when I tell you I am no stranger to long, busy days that carry over to the next. We strive to deliver a professional, trustworthy service that affords our customers the peace of mind to know their spaces are well maintained.
 
 Thank you again for the opportunity to partner with you to take your spaces beyond clean enough!
 
@@ -129,8 +136,7 @@ Rules:
         temperature=0.2,
     )
 
-    content = resp.choices[0].message.content
-    return json.loads(content)
+    return json.loads(resp.choices[0].message.content)
 
 
 # =========================
@@ -157,8 +163,13 @@ def extract_text(uploaded_file) -> str:
 # =========================
 # WORD HELPERS
 # =========================
+def add_heading(doc: Document, text: str):
+    p = doc.add_paragraph(text)
+    (p.runs[0] if p.runs else p.add_run(text)).bold = True
+    return p
+
+
 def add_bullet_paragraph(doc: Document, text: str):
-    """Use a bullet style if present; otherwise safe manual bullet so template differences never crash."""
     for style_name in ("List Bullet", "List Paragraph", "Bullet List"):
         try:
             doc.add_paragraph(text, style=style_name)
@@ -169,19 +180,26 @@ def add_bullet_paragraph(doc: Document, text: str):
 
 
 def add_cover_page(doc: Document, client: str, body: str):
+    doc.add_paragraph(client)
     doc.add_paragraph("")
+    doc.add_paragraph("Attn: ______________________")
     doc.add_paragraph("")
+    doc.add_paragraph("Re: Janitorial Services Proposal")
     doc.add_paragraph("")
     doc.add_paragraph(f"Dear {client},")
     doc.add_paragraph("")
     doc.add_paragraph(body or "")
     doc.add_paragraph("")
+    doc.add_paragraph("Respectfully,")
+    doc.add_paragraph("")
+    doc.add_paragraph("Kary Jubilee")
+    doc.add_paragraph("President")
+    doc.add_paragraph("Torus Cleaning Services")
     doc.add_page_break()
 
 
 def add_scope_table(doc: Document, rows: List[tuple]):
-    title = doc.add_paragraph("SCOPE OF WORK – CLEANING SCHEDULE")
-    (title.runs[0] if title.runs else title.add_run("SCOPE OF WORK – CLEANING SCHEDULE")).bold = True
+    add_heading(doc, "SCOPE OF WORK – CLEANING SCHEDULE")
 
     table = doc.add_table(rows=1, cols=4)
     table.style = "Table Grid"
@@ -203,8 +221,144 @@ def add_scope_table(doc: Document, rows: List[tuple]):
     doc.add_paragraph("")
 
 
+def add_signature_blocks(doc: Document, contractor_name: str, contractor_title: str):
+    doc.add_paragraph("")
+    add_heading(
+        doc,
+        "IN WITNESS WHEREOF, the undersigned have executed this Cleaning Service Agreement effective on the date below."
+    )
+    doc.add_paragraph("")
+
+    # Contractor block
+    doc.add_paragraph("Date: ___________________")
+    doc.add_paragraph("__________________________________")
+    doc.add_paragraph("Contractor’s Signature")
+    doc.add_paragraph(f"Contractor Printed Name: {contractor_name}")
+    doc.add_paragraph(f"Title: {contractor_title}")
+
+    doc.add_paragraph("")
+
+    # Client block (requested: print name + title + signature + date)
+    doc.add_paragraph("Date: ___________________")
+    doc.add_paragraph("__________________________________")
+    doc.add_paragraph("Client’s Signature")
+    doc.add_paragraph("Client Printed Name: _____________________________")
+    doc.add_paragraph("Client Title: ____________________________________")
+
+
+# =========================
+# CONTRACT SECTIONS (from your PDF)
+# =========================
+def add_employee_conduct_section(doc: Document):
+    add_heading(doc, "CONDUCT OF EMPLOYEES")
+    doc.add_paragraph(
+        "The Contractor shall be responsible for controlling employee conduct, for assuring that its employees "
+        "are not boisterous or rude, and assuring that they are not engaging in any destructive or criminal activity. "
+        "The Contractor is also responsible for assuring that its employees do not disturb papers on desks, open desk "
+        "drawers, cabinets, briefcases, or use Client phones, except as authorized. The Contractor and its employees "
+        "shall conduct themselves in a professional manner and not read newspapers, books, or similar items while at "
+        "the job site. In addition, the Contractor’s employee shall not fraternize with Client’s employees while at the job site."
+    )
+    doc.add_paragraph(
+        "The Client reserves the right to request the removal of any of the Contractor's employees from the building at any time. "
+        "Such requests will be made to the Contractor’s supervisory personnel. At no time shall the Client assume the role of the "
+        "supervisor of the Contractor's personnel."
+    )
+    doc.add_paragraph(
+        "Should the Client observe any action by the Contractor's personnel that requires correction, they shall immediately report "
+        "the action to the Contractor's supervisor, who in turn shall take immediate corrective measures. In the event the Contractor's "
+        "supervisor does not take immediate corrective measures, the Client shall exercise the option of requesting the removal of the "
+        "offending Contractor's employee from property."
+    )
+    doc.add_paragraph(
+        "The Client will make a written report of any occurrence of misconduct by the Contractor's employees to the Contract Administrator "
+        "within twenty-four (24) hours of such an occurrence. It is agreed that any of the following actions by the Contractor's employee(s) "
+        "shall be cause for removal. These include but are not limited to:"
+    )
+    # list items (as in the contract)
+    add_bullet_paragraph(doc, "Employee in any portion of the building in which their presence is not required by the work.")
+    add_bullet_paragraph(doc, "Sitting on any furniture in the office areas.")
+    add_bullet_paragraph(doc, "Using any office equipment or supplies in the office areas.")
+    add_bullet_paragraph(doc, "Opening any drawers, cabinets, files, etc., or reading or removing any letters, documents, etc.")
+    add_bullet_paragraph(doc, "Engaging in any loud, boisterous, or un-workmanlike conduct.")
+    add_bullet_paragraph(doc, "Consuming food or beverage (other than water) in any area of the building other than the kitchen.")
+    doc.add_paragraph("")
+
+
+def add_on_site_storage_section(doc: Document):
+    add_heading(doc, "ON-SITE STORAGE")
+    doc.add_paragraph(
+        "The Client will supply reasonable and suitable on-site storage space for such cleaning equipment and materials as the Contractor "
+        "deems necessary for the performance of the Contract."
+    )
+    doc.add_paragraph("")
+
+
+def add_compensation_section(doc: Document, amount: float, basis: str, net_terms_days: Optional[int]):
+    add_heading(doc, "COMPENSATION")
+
+    basis_norm = (basis or "").strip().lower()
+    basis_label = {"annual": "annual", "monthly": "monthly", "per visit": "per visit"}.get(basis_norm, basis_norm or "annual")
+
+    # mirrors the contract language but keeps your variable amount/basis
+    doc.add_paragraph(
+        f"The Contractor will charge a flat {basis_label} fee of ${amount:,.2f} for the Services listed within this Agreement. "
+        "The Compensation includes sales tax and other applicable duties as may be required by law."
+    )
+    doc.add_paragraph("The Client will be invoiced when the Services are completed monthly.")
+
+    if net_terms_days is not None:
+        doc.add_paragraph(f"Invoices submitted by the Contractor to the Client are due within {int(net_terms_days)} days of receipt.")
+    else:
+        doc.add_paragraph("Invoices submitted by the Contractor to the Client are due within ____ days of receipt.")
+
+    doc.add_paragraph(
+        "The Contractor will be reimbursed for any expenses incurred in connection with providing the Services of this Agreement."
+    )
+    doc.add_paragraph("")
+
+
+def add_interest_section(doc: Document, late_interest_percent: float):
+    add_heading(doc, "INTEREST ON LATE PAYMENTS")
+    doc.add_paragraph(
+        f"Interest payable on any overdue amounts under this Agreement is charged at the rate of {late_interest_percent:.2f}% (percent)."
+    )
+    doc.add_paragraph("")
+
+
+def add_modification_section(doc: Document):
+    add_heading(doc, "MODIFICATION OF AGREEMENT")
+    doc.add_paragraph(
+        "Any amendment or modification of this Agreement or additional obligation assumed by either Party in connection with this Agreement "
+        "will only be binding if evidenced in writing signed by each Party or an authorized representative of each Party."
+    )
+    doc.add_paragraph("")
+
+
+def add_access_section(doc: Document):
+    add_heading(doc, "ACCESS")
+    doc.add_paragraph(
+        "The Client agrees to provide the Contractor with the necessary access to the Property and all areas of the Property as defined within the Agreement."
+    )
+    doc.add_paragraph("")
+
+
+def add_cancellation_section(doc: Document):
+    add_heading(doc, "CANCELLATION")
+    doc.add_paragraph("This service agreement may be terminated at any time by the Client or Contractor upon mutual agreement.")
+    doc.add_paragraph(
+        "The Client understands that the Contractor may terminate this agreement at any time if the Client fails to pay for the Services provided "
+        "under this Agreement or if the Client breaches any other material provision listed in this Cleaning Services Agreement. Client agrees to pay "
+        "any outstanding balances within (10) ten days of termination."
+    )
+    doc.add_paragraph("")
+
+
+# =========================
+# DOC BUILDER
+# =========================
 def build_doc(p: ProposalInputs, schedule_rows: List[tuple]) -> bytes:
-    template_path = "Torus_Template.docx"
+    template_path = "proposal_template.docx"
     doc = Document(template_path) if os.path.exists(template_path) else Document()
 
     for s in doc.sections:
@@ -230,10 +384,9 @@ def build_doc(p: ProposalInputs, schedule_rows: List[tuple]) -> bytes:
         a2 = (a or "").strip()
         if a2:
             add_bullet_paragraph(doc, a2)
-
     doc.add_paragraph("")
 
-    # Required paragraphs (agreement date blank)
+    # Contract paragraphs (date blank)
     client_name = p.client.strip() if p.client.strip() else "[Client Name]"
     doc.add_paragraph(
         f"{client_name}, ('Client'), enters into this agreement on this date ______________ "
@@ -244,16 +397,11 @@ def build_doc(p: ProposalInputs, schedule_rows: List[tuple]) -> bytes:
         f"Contractor shall provide janitorial services {p.days_per_week} per week between the hours of "
         f"{p.cleaning_times} for the facility/facilities located at the addresses listed above."
     )
-    doc.add_paragraph(
-        f"The contract period is as follows {p.service_begin_date} to {p.service_end_date}."
-    )
-
+    doc.add_paragraph(f"The contract period is as follows {p.service_begin_date} to {p.service_end_date}.")
     doc.add_paragraph("")
 
     # Room counts
-    h = doc.add_paragraph("ROOM COUNTS")
-    (h.runs[0] if h.runs else h.add_run("ROOM COUNTS")).bold = True
-
+    add_heading(doc, "ROOM COUNTS")
     add_bullet_paragraph(doc, f"Offices: {p.num_offices}")
     add_bullet_paragraph(doc, f"Conference rooms: {p.num_conference_rooms}")
     add_bullet_paragraph(doc, f"Break rooms: {p.num_break_rooms}")
@@ -266,7 +414,6 @@ def build_doc(p: ProposalInputs, schedule_rows: List[tuple]) -> bytes:
         rc = int(r.get("count", 0) or 0)
         if rt and rc > 0:
             custom.append((rt, rc))
-
     if custom:
         doc.add_paragraph("Additional room types:")
         for rt, rc in custom:
@@ -277,20 +424,17 @@ def build_doc(p: ProposalInputs, schedule_rows: List[tuple]) -> bytes:
     # Scope table
     add_scope_table(doc, schedule_rows)
 
-    # Optional Cleaning Plan
+    # Cleaning plan (optional)
     if (p.cleaning_plan or "").strip():
-        h = doc.add_paragraph("CLEANING PLAN")
-        (h.runs[0] if h.runs else h.add_run("CLEANING PLAN")).bold = True
+        add_heading(doc, "CLEANING PLAN")
         doc.add_paragraph(p.cleaning_plan.strip())
         doc.add_paragraph("")
 
-    # General Requirements (only show consumables that are selected)
-    h = doc.add_paragraph("GENERAL REQUIREMENTS")
-    (h.runs[0] if h.runs else h.add_run("GENERAL REQUIREMENTS")).bold = True
+    # General requirements
+    add_heading(doc, "GENERAL REQUIREMENTS")
     doc.add_paragraph(
-        "Contractor shall provide all labor, supervision, and personnel necessary to perform the services "
-        "described in this agreement. Unless otherwise stated, Contractor shall provide all standard equipment "
-        "and cleaning supplies."
+        "Contractor shall provide all labor, supervision, and personnel necessary to perform the services described in this agreement. "
+        "Unless otherwise stated, Contractor shall provide all standard equipment and cleaning supplies."
     )
 
     consumables_lines = []
@@ -307,10 +451,37 @@ def build_doc(p: ProposalInputs, schedule_rows: List[tuple]) -> bytes:
         for line in consumables_lines:
             doc.add_paragraph(line)
 
-    # Notes
     doc.add_paragraph("")
-    doc.add_paragraph("NOTES")
+
+    # ==== NEW CONTRACT SECTIONS (requested) ====
+    if p.include_employee_conduct:
+        add_employee_conduct_section(doc)
+
+    if p.include_on_site_storage:
+        add_on_site_storage_section(doc)
+
+    if p.include_compensation_section and p.compensation_amount is not None:
+        add_compensation_section(doc, p.compensation_amount, p.compensation_basis, p.net_terms_days)
+
+        # include interest section only if you provided it
+        if p.late_interest_percent is not None:
+            add_interest_section(doc, p.late_interest_percent)
+
+    if p.include_modification:
+        add_modification_section(doc)
+
+    if p.include_access:
+        add_access_section(doc)
+
+    if p.include_cancellation:
+        add_cancellation_section(doc)
+
+    # Notes
+    add_heading(doc, "NOTES")
     doc.add_paragraph((p.notes or "").strip() or "(none)")
+
+    # Signatures
+    add_signature_blocks(doc, p.contractor_printed_name, p.contractor_title)
 
     bio = BytesIO()
     doc.save(bio)
@@ -318,7 +489,7 @@ def build_doc(p: ProposalInputs, schedule_rows: List[tuple]) -> bytes:
 
 
 # =========================
-# STREAMLIT UI (Single form style)
+# STREAMLIT UI (Single-page)
 # =========================
 st.set_page_config(layout="wide")
 st.title("Torus Group – Cleaning Proposal Builder")
@@ -341,13 +512,24 @@ default_schedule_rows = [
     ("High dusting (vents/ledges)", False, False, True),
     ("Detail baseboards/edges", False, False, True),
 ]
-
 if st.session_state["schedule_df"] is None:
-    st.session_state["schedule_df"] = pd.DataFrame(
-        default_schedule_rows, columns=["Task", "Daily", "Weekly", "Monthly"]
-    )
+    st.session_state["schedule_df"] = pd.DataFrame(default_schedule_rows, columns=["Task", "Daily", "Weekly", "Monthly"])
 
-# One form for clean UX
+# iPad-friendly buttons (outside the form)
+topA, topB, topC = st.columns([1, 1, 2])
+with topA:
+    if st.button("➕ Add room type row"):
+        st.session_state["custom_rooms"].append({"type": "", "count": 0})
+        st.rerun()
+with topB:
+    if st.button("🧹 Add schedule task row"):
+        df = st.session_state["schedule_df"]
+        df.loc[len(df)] = ["", False, False, False]
+        st.session_state["schedule_df"] = df
+        st.rerun()
+with topC:
+    st.caption(f"Template found: {os.path.exists('proposal_template.docx')}")
+
 with st.form("proposal_form", clear_on_submit=False):
     st.subheader("Client & Contract")
     c1, c2, c3 = st.columns(3)
@@ -376,30 +558,20 @@ with st.form("proposal_form", clear_on_submit=False):
         baths = st.number_input("Bathrooms", min_value=0, value=0)
 
     st.subheader("Additional Room Types (Name + Count)")
-    st.caption("Add any room type (e.g., Exam rooms, Classrooms, Server rooms) and set the count.")
-
-    # Render custom rooms inside the form using session state
+    st.caption("Rows with blank name or 0 count will not print.")
     for i, room in enumerate(st.session_state["custom_rooms"]):
         c1, c2 = st.columns([3, 1])
         with c1:
             st.session_state["custom_rooms"][i]["type"] = st.text_input(
-                f"custom_room_type_{i}",
-                value=room.get("type", ""),
-                placeholder="Room type name",
+                f"custom_room_type_{i}", value=room.get("type", ""), placeholder="e.g., Exam Rooms"
             )
         with c2:
             st.session_state["custom_rooms"][i]["count"] = st.number_input(
-                f"custom_room_count_{i}",
-                min_value=0,
-                step=1,
-                value=int(room.get("count", 0) or 0),
+                f"custom_room_count_{i}", min_value=0, step=1, value=int(room.get("count", 0) or 0)
             )
-
-    add_room = st.checkbox("Add another custom room type", value=False)
 
     st.subheader("Consumables (Optional)")
     st.caption("Leave blank if not included. Only selected items will appear in the agreement.")
-
     cA, cB, cC = st.columns(3)
     with cA:
         hand_soap = st.selectbox("Hand soap", ["(leave blank)", "Contractor", "Client"], index=0)
@@ -410,24 +582,41 @@ with st.form("proposal_form", clear_on_submit=False):
 
     st.subheader("Cover Page")
     include_cover = st.checkbox("Include cover page", value=True)
-
     use_standard_cover = st.checkbox("Use Torus standard cover letter", value=True)
     if use_standard_cover:
         cover_body = default_cover_letter(client)
-        st.text_area("Cover letter (preview)", value=cover_body, height=240, disabled=True)
+        st.text_area("Cover letter (preview)", value=cover_body, height=220, disabled=True)
     else:
-        cover_body = st.text_area(
-            "Cover letter body",
-            value=st.session_state.get("cover_body_custom", ""),
-            height=240
-        )
+        cover_body = st.text_area("Cover letter body", value=st.session_state.get("cover_body_custom", ""), height=220)
+
+    st.subheader("Contract Sections (Include/Exclude)")
+    s1, s2, s3 = st.columns(3)
+    with s1:
+        include_employee_conduct = st.checkbox("Employee Conduct", value=True)
+        include_on_site_storage = st.checkbox("On-Site Storage", value=True)
+    with s2:
+        include_compensation_section = st.checkbox("Compensation / Late Interest", value=True)
+        include_modification = st.checkbox("Modification of Agreement", value=True)
+    with s3:
+        include_access = st.checkbox("Access", value=True)
+        include_cancellation = st.checkbox("Cancellation", value=True)
+
+    st.subheader("Payment (Optional)")
+    pay1, pay2, pay3, pay4 = st.columns([1, 1, 1, 1])
+    with pay1:
+        amount = st.text_input("Compensation amount (numbers only)", value="")
+    with pay2:
+        basis = st.selectbox("Basis", ["monthly", "annual", "per visit"], index=1)
+    with pay3:
+        net_terms = st.selectbox("Net terms (days)", ["(leave blank)", "15", "30", "45", "60"], index=2)
+    with pay4:
+        late_interest = st.text_input("Late interest % (optional)", value="")
 
     st.subheader("Cleaning Plan & Notes")
-    cleaning_plan = st.text_area("Cleaning Plan (optional)", height=140)
-    notes = st.text_area("Notes", height=120)
+    cleaning_plan = st.text_area("Cleaning Plan (optional)", height=120)
+    notes = st.text_area("Notes", height=110)
 
     st.subheader("Cleaning Schedule")
-    st.caption("Edit tasks freely. Add new rows at the bottom.")
     schedule_df = st.data_editor(
         st.session_state["schedule_df"],
         num_rows="dynamic",
@@ -438,28 +627,21 @@ with st.form("proposal_form", clear_on_submit=False):
     st.subheader("RFP / PWS Analyzer (Optional)")
     uploads = st.file_uploader("Upload RFP/PWS", type=["pdf", "docx", "txt"], accept_multiple_files=True)
 
-    col1, col2, col3 = st.columns([1, 1, 2])
-    with col1:
+    action1, action2 = st.columns([1, 1])
+    with action1:
         analyze_btn = st.form_submit_button("Analyze with AI")
-    with col2:
+    with action2:
         generate_btn = st.form_submit_button("Generate Proposal")
-    with col3:
-        st.caption(f"Template found: {os.path.exists('Torus_Template.docx')}")
 
-# Post-form: update session state objects
+# Post-form: persist edits
 st.session_state["schedule_df"] = schedule_df
-if add_room:
-    st.session_state["custom_rooms"].append({"type": "", "count": 0})
-    st.rerun()
+if not use_standard_cover:
+    st.session_state["cover_body_custom"] = cover_body
 
-# Normalize consumables (blank -> None)
+# Normalize consumables
 hand_soap_val = None if hand_soap == "(leave blank)" else hand_soap
 paper_towels_val = None if paper_towels == "(leave blank)" else paper_towels
 toilet_paper_val = None if toilet_paper == "(leave blank)" else toilet_paper
-
-# Persist custom cover letter edits
-if not use_standard_cover:
-    st.session_state["cover_body_custom"] = cover_body
 
 # Parse addresses
 addresses = [x.strip() for x in (addresses_text or "").splitlines() if x.strip()]
@@ -470,6 +652,19 @@ schedule_rows = [
     for r in st.session_state["schedule_df"].itertuples()
     if str(r.Task).strip()
 ]
+
+def parse_float_or_none(x: str) -> Optional[float]:
+    x = (x or "").strip()
+    if not x:
+        return None
+    try:
+        return float(x.replace(",", "").replace("$", ""))
+    except Exception:
+        return None
+
+comp_amount = parse_float_or_none(amount)
+late_interest_val = parse_float_or_none(late_interest)
+net_terms_val = None if net_terms == "(leave blank)" else int(net_terms)
 
 # AI analysis
 if analyze_btn:
@@ -492,14 +687,8 @@ if st.session_state.get("ai"):
     ai = st.session_state["ai"]
     st.divider()
     st.subheader("AI Results")
-    st.text_area("AI Cleaning Plan", ai.get("cleaning_plan_draft", ""), height=160)
-    st.text_area("AI Scope of Work", ai.get("scope_of_work_draft", ""), height=160)
-
-    qs = ai.get("clarifying_questions", [])
-    if qs:
-        st.write("**Clarifying questions**")
-        for q in qs:
-            st.write(f"- {q}")
+    st.text_area("AI Cleaning Plan", ai.get("cleaning_plan_draft", ""), height=150)
+    st.text_area("AI Scope of Work", ai.get("scope_of_work_draft", ""), height=150)
 
     if st.button("Apply AI schedule to table"):
         rows = []
@@ -542,6 +731,21 @@ if generate_btn:
 
         cleaning_plan=cleaning_plan,
         notes=notes,
+
+        compensation_amount=comp_amount,
+        compensation_basis=basis,
+        net_terms_days=net_terms_val,
+        late_interest_percent=late_interest_val,
+        include_compensation_section=include_compensation_section,
+
+        include_employee_conduct=include_employee_conduct,
+        include_on_site_storage=include_on_site_storage,
+        include_modification=include_modification,
+        include_access=include_access,
+        include_cancellation=include_cancellation,
+
+        contractor_printed_name="Kary Jubilee",
+        contractor_title="President, Torus Cleaning Services",
     )
 
     docx_bytes = build_doc(p, schedule_rows)
