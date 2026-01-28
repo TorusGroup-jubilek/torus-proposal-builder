@@ -358,7 +358,7 @@ def add_cancellation_section(doc: Document):
 # DOC BUILDER
 # =========================
 def build_doc(p: ProposalInputs, schedule_rows: List[tuple]) -> bytes:
-    template_path = "proposal_template.docx"
+    template_path = "Torus_Template.docx"
     doc = Document(template_path) if os.path.exists(template_path) else Document()
 
     for s in doc.sections:
@@ -528,7 +528,7 @@ with topB:
         st.session_state["schedule_df"] = df
         st.rerun()
 with topC:
-    st.caption(f"Template found: {os.path.exists('proposal_template.docx')}")
+    st.caption(f"Template found: {os.path.exists('Torus_Template.docx')}")
 
 with st.form("proposal_form", clear_on_submit=False):
     st.subheader("Client & Contract")
