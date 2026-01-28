@@ -396,28 +396,47 @@ def build_doc(p: ProposalInputs, schedule_rows: List[tuple]) -> bytes:
     doc.add_paragraph(f"The contract period is as follows {p.service_begin_date} to {p.service_end_date}.")
     doc.add_paragraph("")
 
-    # Room counts
+    # Room counts (FIXED: no zeros, no duplicates)
     add_heading(doc, "ROOM COUNTS")
-    add_bullet_paragraph(doc, f"Offices: {p.num_offices}")
-    add_bullet_paragraph(doc, f"Conference rooms: {p.num_conference_rooms}")
-    add_bullet_paragraph(doc, f"Break rooms: {p.num_break_rooms}")
-    add_bullet_paragraph(doc, f"Bathrooms: {p.num_bathrooms}")
 
-    # Custom rooms
-    extras = []
+    standard = [
+        ("Offices", int(p.num_offices or 0)),
+        ("Conference rooms", int(p.num_conference_rooms or 0)),
+        ("Break rooms", int(p.num_break_rooms or 0)),
+        ("Bathrooms", int(p.num_bathrooms or 0)),
+    ]
+    seen = {name.strip().lower() for name, _ in standard}
+
+    printed_any = False
+    for name, count in standard:
+        if count > 0:
+            add_bullet_paragraph(doc, f"{name}: {count}")
+            printed_any = True
+
+    # Custom rooms: print only if >0 and not duplicating standard room names
+    custom_printed = []
     for r in (p.custom_rooms or []):
         rt = str(r.get("type", "")).strip()
+        key = rt.lower()
         try:
             rc = int(r.get("count", 0) or 0)
         except Exception:
             rc = 0
-        if rt and rc > 0:
-            extras.append((rt, rc))
 
-    if extras:
-        doc.add_paragraph("Additional room types:")
-        for rt, rc in extras:
-            add_bullet_paragraph(doc, f"{rt}: {rc}")
+        if not rt or rc <= 0:
+            continue
+        if key in seen:
+            continue
+
+        seen.add(key)
+        custom_printed.append((rt, rc))
+
+    for rt, rc in custom_printed:
+        add_bullet_paragraph(doc, f"{rt}: {rc}")
+        printed_any = True
+
+    if not printed_any:
+        doc.add_paragraph("(none)")
 
     doc.add_paragraph("")
 
@@ -475,9 +494,10 @@ def build_doc(p: ProposalInputs, schedule_rows: List[tuple]) -> bytes:
     if p.include_cancellation:
         add_cancellation_section(doc)
 
-    # Notes
-    add_heading(doc, "NOTES")
-    doc.add_paragraph((p.notes or "").strip() or "(none)")
+    # Notes (FIXED: only print if notes has input)
+    if (p.notes or "").strip():
+        add_heading(doc, "NOTES")
+        doc.add_paragraph(p.notes.strip())
 
     # Signatures
     add_signature_blocks(doc, p.contractor_printed_name, p.contractor_title)
@@ -513,17 +533,20 @@ def build_print_preview_html(li: dict) -> str:
     breaks = li.get("breaks", 0)
     baths = li.get("baths", 0)
 
+    # Custom rooms
     custom_rooms = li.get("custom_rooms", []) or []
     custom_lines = []
     for r in custom_rooms:
         rt = str(r.get("type", "")).strip()
+        key = rt.lower()
         try:
             rc = int(r.get("count", 0) or 0)
         except Exception:
             rc = 0
         if rt and rc > 0:
-            custom_lines.append(f"<li>{_esc(rt)}: {rc}</li>")
+            custom_lines.append((key, f"<li>{_esc(rt)}: {rc}</li>"))
 
+    # Consumables
     cons = li.get("consumables", {}) or {}
     cons_lines = []
     if cons.get("hand_soap"):
@@ -533,6 +556,7 @@ def build_print_preview_html(li: dict) -> str:
     if cons.get("toilet_paper"):
         cons_lines.append(f"<li>Toilet paper: {_esc(cons['toilet_paper'])}</li>")
 
+    # Payment
     pay = li.get("payment", {}) or {}
     amount = pay.get("amount")
     basis = (pay.get("basis") or "").strip()
@@ -547,9 +571,11 @@ def build_print_preview_html(li: dict) -> str:
         "one-time clean": "The Client will be invoiced upon completion of the Services.",
     }.get(basis_norm, "The Client will be invoiced upon completion of the Services.")
 
+    # Schedule
     schedule_rows = li.get("schedule_rows", []) or []
     schedule_table_html = schedule_rows_to_html_table(schedule_rows)
 
+    # Addresses
     addr_html = "".join(f"<li>{_esc(a)}</li>" for a in addresses) if addresses else "<li>(none)</li>"
     first_addr = addresses[0] if addresses else "[service address]"
     first_addr_esc = _esc(first_addr)
@@ -557,17 +583,29 @@ def build_print_preview_html(li: dict) -> str:
     cleaning_plan = _esc(li.get("cleaning_plan", "") or "")
     notes = _esc(li.get("notes", "") or "")
 
-    secs = li.get("sections", {}) or {}
-    included = []
-    if secs.get("employee_conduct"): included.append("CONDUCT OF EMPLOYEES")
-    if secs.get("on_site_storage"): included.append("ON-SITE STORAGE")
-    if secs.get("compensation") and (amount is not None): included.append("COMPENSATION / INTEREST ON LATE PAYMENTS")
-    if secs.get("modification"): included.append("MODIFICATION OF AGREEMENT")
-    if secs.get("access"): included.append("ACCESS")
-    if secs.get("cancellation"): included.append("CANCELLATION")
-    included_html = "".join(f"<li>{_esc(s)}</li>" for s in included) if included else "<li>(none)</li>"
+    # Room counts preview: remove zeros and prevent duplicates
+    standard = [
+        ("offices", "Offices", int(offices or 0)),
+        ("conference rooms", "Conference rooms", int(conference or 0)),
+        ("break rooms", "Break rooms", int(breaks or 0)),
+        ("bathrooms", "Bathrooms", int(baths or 0)),
+    ]
+    seen = {k for k, _, _ in standard}
+    rooms_html_lines = []
+    for _, label, count in standard:
+        if count > 0:
+            rooms_html_lines.append(f"<li>{_esc(label)}: {count}</li>")
 
-    payment_html = ""
+    # add custom rooms if not duplicates
+    for key, line in custom_lines:
+        if key in seen:
+            continue
+        seen.add(key)
+        rooms_html_lines.append(line)
+
+    rooms_html = "<ul>" + "".join(rooms_html_lines) + "</ul>" if rooms_html_lines else "<p class='muted'>(none)</p>"
+
+    # Payment preview
     if amount is None:
         payment_html = "<p class='muted'>(Compensation section will not print — no amount entered.)</p>"
     else:
@@ -580,10 +618,20 @@ def build_print_preview_html(li: dict) -> str:
             payment_html += f"<p><b>Interest on late payments:</b> {late_interest:.2f}%</p>"
 
     consumables_html = "<ul>" + "".join(cons_lines) + "</ul>" if cons_lines else "<p class='muted'>(No consumables will print.)</p>"
-    custom_rooms_html = "<ul>" + "".join(custom_lines) + "</ul>" if custom_lines else "<p class='muted'>(No additional room types will print.)</p>"
-
     cleaning_plan_html = f"<p>{cleaning_plan}</p>" if cleaning_plan.strip() else "<p class='muted'>(Not included.)</p>"
-    notes_html = f"<p>{notes}</p>" if notes.strip() else "<p class='muted'>(none)</p>"
+
+    # Notes preview: only show if notes has input
+    notes_html = f"<p>{notes}</p>" if notes.strip() else ""
+
+    secs = li.get("sections", {}) or {}
+    included = []
+    if secs.get("employee_conduct"): included.append("CONDUCT OF EMPLOYEES")
+    if secs.get("on_site_storage"): included.append("ON-SITE STORAGE")
+    if secs.get("compensation") and (amount is not None): included.append("COMPENSATION / INTEREST ON LATE PAYMENTS")
+    if secs.get("modification"): included.append("MODIFICATION OF AGREEMENT")
+    if secs.get("access"): included.append("ACCESS")
+    if secs.get("cancellation"): included.append("CANCELLATION")
+    included_html = "".join(f"<li>{_esc(s)}</li>" for s in included) if included else "<li>(none)</li>"
 
     html_out = f"""
     <div class="page">
@@ -605,15 +653,7 @@ def build_print_preview_html(li: dict) -> str:
       <p>The contract period is as follows <b>{begin}</b> to <b>{end}</b>.</p>
 
       <h3>ROOM COUNTS</h3>
-      <ul>
-        <li>Offices: {offices}</li>
-        <li>Conference rooms: {conference}</li>
-        <li>Break rooms: {breaks}</li>
-        <li>Bathrooms: {baths}</li>
-      </ul>
-
-      <p><b>Additional room types:</b></p>
-      {custom_rooms_html}
+      {rooms_html}
 
       <h3>SCOPE OF WORK – CLEANING SCHEDULE</h3>
       <div class="table-wrap">{schedule_table_html}</div>
@@ -633,10 +673,15 @@ def build_print_preview_html(li: dict) -> str:
 
       <h3>INCLUDED CONTRACT SECTIONS</h3>
       <ul>{included_html}</ul>
+    """
 
+    if notes_html:
+        html_out += f"""
       <h3>NOTES</h3>
       {notes_html}
+        """
 
+    html_out += """
       <h3>SIGNATURES</h3>
       <p><b>Date:</b> ___________________<br/>
          _________________________________<br/>
@@ -882,7 +927,7 @@ if update_preview_btn or analyze_btn or generate_btn:
     }
 
 # =========================
-# PRINT PREVIEW (keeps same placement, just changes rendering)
+# PREVIEW
 # =========================
 st.divider()
 st.subheader("Preview")
