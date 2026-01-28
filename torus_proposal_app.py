@@ -13,6 +13,8 @@ from docx.enum.table import WD_TABLE_ALIGNMENT
 from pypdf import PdfReader
 from openai import OpenAI
 
+import html
+
 CHECK = "✓"
 TEMPLATE_FILE = "Torus_Template.docx"
 
@@ -237,7 +239,7 @@ def add_signature_blocks(doc: Document, contractor_name: str, contractor_title: 
 
 
 # =========================
-# CONTRACT SECTIONS (from your contract – cleaned + trimmed)
+# CONTRACT SECTIONS
 # =========================
 def add_employee_conduct_section(doc: Document):
     add_heading(doc, "CONDUCT OF EMPLOYEES")
@@ -280,6 +282,7 @@ def add_on_site_storage_section(doc: Document):
 
 def add_compensation_section(doc: Document, amount: float, basis: str, net_terms_days: Optional[int]):
     add_heading(doc, "COMPENSATION")
+
     basis_norm = (basis or "").strip().lower()
     basis_label = {
         "annual": "annual",
@@ -288,11 +291,18 @@ def add_compensation_section(doc: Document, amount: float, basis: str, net_terms
         "one-time clean": "one-time clean",
     }.get(basis_norm, basis_norm or "annual")
 
+    invoice_sentence = {
+        "monthly": "The Client will be invoiced monthly in arrears.",
+        "annual": "The Client will be invoiced annually.",
+        "per visit": "The Client will be invoiced per visit upon completion of each visit.",
+        "one-time clean": "The Client will be invoiced upon completion of the Services.",
+    }.get(basis_norm, "The Client will be invoiced upon completion of the Services.")
+
     doc.add_paragraph(
         f"The Contractor will charge a flat {basis_label} fee of ${amount:,.2f} for the Services listed within this Agreement. "
         "The Compensation includes sales tax and other applicable duties as may be required by law."
     )
-    doc.add_paragraph("The Client will be invoiced when the Services are completed monthly.")
+    doc.add_paragraph(invoice_sentence)
 
     if net_terms_days is not None:
         doc.add_paragraph(f"Invoices submitted by the Contractor to the Client are due within {int(net_terms_days)} days of receipt.")
@@ -348,11 +358,9 @@ def add_cancellation_section(doc: Document):
 def build_doc(p: ProposalInputs, schedule_rows: List[tuple]) -> bytes:
     doc = Document(TEMPLATE_FILE) if os.path.exists(TEMPLATE_FILE) else Document()
 
-    # Keep template header visible on first page
     for s in doc.sections:
         s.different_first_page_header_footer = False
 
-    # Cover page (optional)
     if p.include_cover_page:
         client_for_letter = p.client.strip() if p.client.strip() else "[Client Name]"
         add_cover_page(doc, client_for_letter, p.cover_letter_body)
@@ -362,7 +370,7 @@ def build_doc(p: ProposalInputs, schedule_rows: List[tuple]) -> bytes:
     title.alignment = WD_ALIGN_PARAGRAPH.CENTER
     (title.runs[0] if title.runs else title.add_run("CLEANING SERVICE AGREEMENT")).bold = True
 
-    # Basic client fields
+    # Client fields
     doc.add_paragraph(f"Client: {p.client}")
     doc.add_paragraph(f"Facility: {p.facility_name}")
 
@@ -374,20 +382,18 @@ def build_doc(p: ProposalInputs, schedule_rows: List[tuple]) -> bytes:
             add_bullet_paragraph(doc, a2)
     doc.add_paragraph("")
 
-    # Agreement paragraphs (your wording + agreement date blank)
+    # Agreement paragraphs (date blank)
     client_name = p.client.strip() if p.client.strip() else "[Client Name]"
+    first_addr = (p.service_addresses[0] if p.service_addresses else "[service address]")
     doc.add_paragraph(
         f"{client_name}, (‘Client’), enters into this agreement on this date ______________ "
-        f"for Torus Cleaning Services (‘Contractor’), to provide janitorial services for facility/facilities located at the following locations: "
-        f"{(p.service_addresses[0] if p.service_addresses else '[service address]')}"
+        f"for Torus Cleaning Services (‘Contractor’), to provide janitorial services for facility/facilities located at the following locations: {first_addr}"
     )
     doc.add_paragraph(
         f"Contractor shall provide janitorial services {p.days_per_week} per week between the hours of {p.cleaning_times} "
-        f"for the facility/facilities located at {(p.service_addresses[0] if p.service_addresses else '[cleaning address]')}."
+        f"for the facility/facilities located at {first_addr}."
     )
-    doc.add_paragraph(
-        f"The contract period is as follows {p.service_begin_date} to {p.service_end_date}."
-    )
+    doc.add_paragraph(f"The contract period is as follows {p.service_begin_date} to {p.service_end_date}.")
     doc.add_paragraph("")
 
     # Room counts
@@ -398,7 +404,7 @@ def build_doc(p: ProposalInputs, schedule_rows: List[tuple]) -> bytes:
     add_bullet_paragraph(doc, f"Bathrooms: {p.num_bathrooms}")
 
     # Custom rooms
-    custom_lines = []
+    extras = []
     for r in (p.custom_rooms or []):
         rt = str(r.get("type", "")).strip()
         try:
@@ -406,25 +412,25 @@ def build_doc(p: ProposalInputs, schedule_rows: List[tuple]) -> bytes:
         except Exception:
             rc = 0
         if rt and rc > 0:
-            custom_lines.append((rt, rc))
+            extras.append((rt, rc))
 
-    if custom_lines:
+    if extras:
         doc.add_paragraph("Additional room types:")
-        for rt, rc in custom_lines:
+        for rt, rc in extras:
             add_bullet_paragraph(doc, f"{rt}: {rc}")
 
     doc.add_paragraph("")
 
-    # Scope schedule table
+    # Scope table
     add_scope_table(doc, schedule_rows)
 
-    # Cleaning Plan (optional, before General Requirements)
+    # Cleaning plan
     if (p.cleaning_plan or "").strip():
         add_heading(doc, "CLEANING PLAN")
         doc.add_paragraph(p.cleaning_plan.strip())
         doc.add_paragraph("")
 
-    # General Requirements (with optional consumables)
+    # General requirements
     add_heading(doc, "GENERAL REQUIREMENTS")
     doc.add_paragraph(
         "Contractor shall provide all labor, supervision, and personnel necessary to perform the services described in this agreement. "
@@ -447,14 +453,14 @@ def build_doc(p: ProposalInputs, schedule_rows: List[tuple]) -> bytes:
 
     doc.add_paragraph("")
 
-    # Contract sections (ON by default)
+    # Contract sections
     if p.include_employee_conduct:
         add_employee_conduct_section(doc)
 
     if p.include_on_site_storage:
         add_on_site_storage_section(doc)
 
-    # Payment sections: print ONLY if include_compensation_section AND amount entered
+    # Payment sections print only if include_compensation_section AND amount entered
     if p.include_compensation_section and (p.compensation_amount is not None):
         add_compensation_section(doc, p.compensation_amount, p.compensation_basis, p.net_terms_days)
         if p.late_interest_percent is not None:
@@ -482,7 +488,174 @@ def build_doc(p: ProposalInputs, schedule_rows: List[tuple]) -> bytes:
 
 
 # =========================
-# STREAMLIT UI (Single-page, iPad-friendly)
+# PRINT PREVIEW HELPERS (HTML)
+# =========================
+def _esc(x: str) -> str:
+    return html.escape(x or "")
+
+def schedule_rows_to_html_table(rows: List[tuple]) -> str:
+    df = pd.DataFrame(rows, columns=["Task", "Daily", "Weekly", "Monthly"]).copy()
+    for col in ["Daily", "Weekly", "Monthly"]:
+        df[col] = df[col].apply(lambda v: CHECK if bool(v) else "")
+    return df.to_html(index=False, escape=True)
+
+def build_print_preview_html(li: dict) -> str:
+    client = _esc(li.get("client", ""))
+    facility = _esc(li.get("facility", ""))
+    begin = _esc(li.get("begin", ""))
+    end = _esc(li.get("end", ""))
+    days = li.get("days", "")
+    times = _esc(li.get("times", ""))
+    addresses = li.get("addresses", []) or []
+
+    offices = li.get("offices", 0)
+    conference = li.get("conference", 0)
+    breaks = li.get("breaks", 0)
+    baths = li.get("baths", 0)
+
+    custom_rooms = li.get("custom_rooms", []) or []
+    custom_lines = []
+    for r in custom_rooms:
+        rt = str(r.get("type", "")).strip()
+        try:
+            rc = int(r.get("count", 0) or 0)
+        except Exception:
+            rc = 0
+        if rt and rc > 0:
+            custom_lines.append(f"<li>{_esc(rt)}: {rc}</li>")
+
+    cons = li.get("consumables", {}) or {}
+    cons_lines = []
+    if cons.get("hand_soap"):
+        cons_lines.append(f"<li>Hand soap: {_esc(cons['hand_soap'])}</li>")
+    if cons.get("paper_towels"):
+        cons_lines.append(f"<li>Paper towels: {_esc(cons['paper_towels'])}</li>")
+    if cons.get("toilet_paper"):
+        cons_lines.append(f"<li>Toilet paper: {_esc(cons['toilet_paper'])}</li>")
+
+    pay = li.get("payment", {}) or {}
+    amount = pay.get("amount")
+    basis = (pay.get("basis") or "").strip()
+    net_terms = pay.get("net_terms")
+    late_interest = pay.get("late_interest")
+
+    basis_norm = basis.lower()
+    invoice_sentence = {
+        "monthly": "The Client will be invoiced monthly in arrears.",
+        "annual": "The Client will be invoiced annually.",
+        "per visit": "The Client will be invoiced per visit upon completion of each visit.",
+        "one-time clean": "The Client will be invoiced upon completion of the Services.",
+    }.get(basis_norm, "The Client will be invoiced upon completion of the Services.")
+
+    schedule_rows = li.get("schedule_rows", []) or []
+    schedule_table_html = schedule_rows_to_html_table(schedule_rows)
+
+    addr_html = "".join(f"<li>{_esc(a)}</li>" for a in addresses) if addresses else "<li>(none)</li>"
+    first_addr = addresses[0] if addresses else "[service address]"
+    first_addr_esc = _esc(first_addr)
+
+    cleaning_plan = _esc(li.get("cleaning_plan", "") or "")
+    notes = _esc(li.get("notes", "") or "")
+
+    secs = li.get("sections", {}) or {}
+    included = []
+    if secs.get("employee_conduct"): included.append("CONDUCT OF EMPLOYEES")
+    if secs.get("on_site_storage"): included.append("ON-SITE STORAGE")
+    if secs.get("compensation") and (amount is not None): included.append("COMPENSATION / INTEREST ON LATE PAYMENTS")
+    if secs.get("modification"): included.append("MODIFICATION OF AGREEMENT")
+    if secs.get("access"): included.append("ACCESS")
+    if secs.get("cancellation"): included.append("CANCELLATION")
+    included_html = "".join(f"<li>{_esc(s)}</li>" for s in included) if included else "<li>(none)</li>"
+
+    payment_html = ""
+    if amount is None:
+        payment_html = "<p class='muted'>(Compensation section will not print — no amount entered.)</p>"
+    else:
+        payment_html = f"""
+        <p>The Contractor will charge a flat <b>{_esc(basis)}</b> fee of <b>${amount:,.2f}</b> for the Services listed within this Agreement.</p>
+        <p>{_esc(invoice_sentence)}</p>
+        <p>Invoices are due within <b>{_esc(str(net_terms) if net_terms is not None else '____')}</b> days of receipt.</p>
+        """
+        if late_interest is not None:
+            payment_html += f"<p><b>Interest on late payments:</b> {late_interest:.2f}%</p>"
+
+    consumables_html = "<ul>" + "".join(cons_lines) + "</ul>" if cons_lines else "<p class='muted'>(No consumables will print.)</p>"
+    custom_rooms_html = "<ul>" + "".join(custom_lines) + "</ul>" if custom_lines else "<p class='muted'>(No additional room types will print.)</p>"
+
+    cleaning_plan_html = f"<p>{cleaning_plan}</p>" if cleaning_plan.strip() else "<p class='muted'>(Not included.)</p>"
+    notes_html = f"<p>{notes}</p>" if notes.strip() else "<p class='muted'>(none)</p>"
+
+    html_out = f"""
+    <div class="page">
+      <div class="doc-title">CLEANING SERVICE AGREEMENT</div>
+
+      <p><b>Client:</b> {client}<br/>
+         <b>Facility:</b> {facility}</p>
+
+      <p><b>Service Address(es):</b></p>
+      <ul>{addr_html}</ul>
+
+      <p>{client if client else "[Client Name]"}, (‘Client’), enters into this agreement on this date ______________
+      for Torus Cleaning Services (‘Contractor’), to provide janitorial services for facility/facilities located at the following locations:
+      <b>{first_addr_esc}</b></p>
+
+      <p>Contractor shall provide janitorial services <b>{days}</b> per week between the hours of <b>{times}</b>
+      for the facility/facilities located at <b>{first_addr_esc}</b>.</p>
+
+      <p>The contract period is as follows <b>{begin}</b> to <b>{end}</b>.</p>
+
+      <h3>ROOM COUNTS</h3>
+      <ul>
+        <li>Offices: {offices}</li>
+        <li>Conference rooms: {conference}</li>
+        <li>Break rooms: {breaks}</li>
+        <li>Bathrooms: {baths}</li>
+      </ul>
+
+      <p><b>Additional room types:</b></p>
+      {custom_rooms_html}
+
+      <h3>SCOPE OF WORK – CLEANING SCHEDULE</h3>
+      <div class="table-wrap">{schedule_table_html}</div>
+
+      <h3>CLEANING PLAN</h3>
+      {cleaning_plan_html}
+
+      <h3>GENERAL REQUIREMENTS</h3>
+      <p>Contractor shall provide all labor, supervision, and personnel necessary to perform the services described in this agreement.
+      Unless otherwise stated, Contractor shall provide all standard equipment and cleaning supplies.</p>
+
+      <p><b>Consumable supplies:</b></p>
+      {consumables_html}
+
+      <h3>COMPENSATION</h3>
+      {payment_html}
+
+      <h3>INCLUDED CONTRACT SECTIONS</h3>
+      <ul>{included_html}</ul>
+
+      <h3>NOTES</h3>
+      {notes_html}
+
+      <h3>SIGNATURES</h3>
+      <p><b>Date:</b> ___________________<br/>
+         _________________________________<br/>
+         Contractor Signature<br/>
+         Contractor Printed Name: Kary Jubilee<br/>
+         Title: President, Torus Cleaning Services</p>
+
+      <p><b>Date:</b> ___________________<br/>
+         _________________________________<br/>
+         Client Signature<br/>
+         Client Printed Name: _____________________________<br/>
+         Client Title: ____________________________________</p>
+    </div>
+    """
+    return html_out
+
+
+# =========================
+# STREAMLIT UI (Single-page)
 # =========================
 st.set_page_config(layout="wide")
 st.title("Torus Group – Cleaning Proposal Builder")
@@ -491,6 +664,7 @@ st.title("Torus Group – Cleaning Proposal Builder")
 st.session_state.setdefault("ai", None)
 st.session_state.setdefault("cover_body_custom", "")
 st.session_state.setdefault("custom_rooms", [{"type": "", "count": 0}])
+st.session_state.setdefault("last_inputs", None)
 st.session_state.setdefault(
     "schedule_df",
     pd.DataFrame(
@@ -510,7 +684,7 @@ st.session_state.setdefault(
     ),
 )
 
-# Top buttons (outside form) for smoother iPad use
+# iPad-friendly buttons (outside the form)
 top1, top2, top3, top4 = st.columns([1, 1, 1, 2])
 with top1:
     if st.button("➕ Add room row"):
@@ -529,9 +703,6 @@ with top3:
         st.rerun()
 with top4:
     st.caption(f"Template found: {os.path.exists(TEMPLATE_FILE)}  |  Template file: {TEMPLATE_FILE}")
-
-# Store last submitted values so Preview reflects what will actually generate
-st.session_state.setdefault("last_inputs", None)
 
 with st.form("proposal_form", clear_on_submit=False):
     st.subheader("Client & Contract")
@@ -610,7 +781,7 @@ with st.form("proposal_form", clear_on_submit=False):
         include_cancellation = st.checkbox("Cancellation", value=True)
 
     st.subheader("Payment (Optional)")
-    st.caption("Per your rule: Compensation/Interest prints only if you enter a Compensation amount.")
+    st.caption("Compensation/Interest prints only if you enter a Compensation amount.")
     pay1, pay2, pay3, pay4 = st.columns([1, 1, 1, 1])
     with pay1:
         amount = st.text_input("Compensation amount (numbers only)", value="")
@@ -644,7 +815,7 @@ with st.form("proposal_form", clear_on_submit=False):
     with a3:
         generate_btn = st.form_submit_button("Generate Proposal")
 
-# Persist schedule edits and cover letter custom edits
+# Persist edits
 st.session_state["schedule_df"] = schedule_df
 if not use_standard_cover:
     st.session_state["cover_body_custom"] = cover_body
@@ -657,7 +828,7 @@ toilet_paper_val = None if toilet_paper == "(leave blank)" else toilet_paper
 # Parse addresses
 addresses = [x.strip() for x in (addresses_text or "").splitlines() if x.strip()]
 
-# Convert schedule df to rows, skip blank tasks
+# Convert schedule rows
 schedule_rows = [
     (str(r.Task).strip(), bool(r.Daily), bool(r.Weekly), bool(r.Monthly))
     for r in st.session_state["schedule_df"].itertuples()
@@ -677,7 +848,7 @@ comp_amount = parse_float_or_none(amount)
 late_interest_val = parse_float_or_none(late_interest)
 net_terms_val = None if net_terms == "(leave blank)" else int(net_terms)
 
-# Save last submitted inputs when any button is pressed
+# Store preview inputs
 if update_preview_btn or analyze_btn or generate_btn:
     st.session_state["last_inputs"] = {
         "client": client,
@@ -711,90 +882,63 @@ if update_preview_btn or analyze_btn or generate_btn:
     }
 
 # =========================
-# PREVIEW
+# PRINT PREVIEW (keeps same placement, just changes rendering)
 # =========================
 st.divider()
-st.subheader("Preview (What Will Print)")
+st.subheader("Preview")
 
 li = st.session_state.get("last_inputs")
 if not li:
-    st.info("Fill out the form and press **Update Preview** to see what will print.")
+    st.info("Fill out the form and press **Update Preview** to see the print preview.")
 else:
-    colL, colR = st.columns(2)
-
-    with colL:
-        st.markdown("### Service Addresses")
-        if li["addresses"]:
-            for a in li["addresses"]:
-                st.write(f"• {a}")
-        else:
-            st.write("_No addresses will be printed._")
-
-        st.markdown("### Room Counts")
-        st.write(f"- Offices: {li['offices']}")
-        st.write(f"- Conference rooms: {li['conference']}")
-        st.write(f"- Break rooms: {li['breaks']}")
-        st.write(f"- Bathrooms: {li['baths']}")
-
-        extras = []
-        for r in li["custom_rooms"]:
-            rt = str(r.get("type", "")).strip()
-            try:
-                rc = int(r.get("count", 0) or 0)
-            except Exception:
-                rc = 0
-            if rt and rc > 0:
-                extras.append(f"{rt}: {rc}")
-        if extras:
-            st.markdown("**Additional Room Types**")
-            for x in extras:
-                st.write(f"- {x}")
-        else:
-            st.write("_No additional room types will be printed._")
-
-    with colR:
-        st.markdown("### Consumable Supplies")
-        cons = li["consumables"]
-        cons_lines = []
-        if cons.get("hand_soap"):
-            cons_lines.append(f"Hand soap: {cons['hand_soap']}")
-        if cons.get("paper_towels"):
-            cons_lines.append(f"Paper towels: {cons['paper_towels']}")
-        if cons.get("toilet_paper"):
-            cons_lines.append(f"Toilet paper: {cons['toilet_paper']}")
-        if cons_lines:
-            for c in cons_lines:
-                st.write(f"- {c}")
-        else:
-            st.write("_No consumables section will be printed._")
-
-        st.markdown("### Payment")
-        pay = li["payment"]
-        if pay["amount"] is None:
-            st.write("_No Compensation / Interest sections will be printed._")
-        else:
-            st.write(f"- Compensation: ${pay['amount']:,.2f}")
-            st.write(f"- Basis: {pay['basis']}")
-            if pay["net_terms"] is not None:
-                st.write(f"- Net terms: {pay['net_terms']} days")
-            if pay["late_interest"] is not None:
-                st.write(f"- Late interest: {pay['late_interest']:.2f}%")
-
-        st.markdown("### Included Contract Sections")
-        secs = li["sections"]
-        for label, enabled in [
-            ("Employee Conduct", secs["employee_conduct"]),
-            ("On-Site Storage", secs["on_site_storage"]),
-            ("Compensation / Late Interest", secs["compensation"]),
-            ("Modification of Agreement", secs["modification"]),
-            ("Access", secs["access"]),
-            ("Cancellation", secs["cancellation"]),
-        ]:
-            st.write(f"{'✓' if enabled else '—'} {label}")
-
-        st.markdown("### Signatures")
-        st.write("✓ Contractor signature (pre-filled)")
-        st.write("✓ Client printed name/title/signature/date (blank lines)")
+    st.markdown(
+        """
+        <style>
+          .page{
+            background:#fff;
+            max-width: 850px;
+            margin: 0 auto;
+            padding: 48px 56px;
+            border: 1px solid #ddd;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.06);
+            font-family: Arial, Helvetica, sans-serif;
+            line-height: 1.35;
+          }
+          .doc-title{
+            text-align:center;
+            font-size: 20px;
+            font-weight: 700;
+            margin-bottom: 18px;
+            letter-spacing: 0.5px;
+          }
+          h3{
+            margin-top: 18px;
+            margin-bottom: 8px;
+            font-size: 14px;
+            font-weight: 700;
+          }
+          ul{ margin-top: 6px; }
+          .muted{ color:#666; font-style: italic; }
+          table{
+            width:100%;
+            border-collapse: collapse;
+            font-size: 12px;
+          }
+          th, td{
+            border:1px solid #444;
+            padding: 6px;
+            vertical-align: top;
+          }
+          th{
+            font-weight: 700;
+            text-align:left;
+          }
+          .table-wrap{ margin-top: 8px; }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.markdown(build_print_preview_html(li), unsafe_allow_html=True)
 
 # =========================
 # AI ANALYSIS
